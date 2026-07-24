@@ -1,0 +1,42 @@
+# The real p2panda transport for the `para.p2p` capability (para-namespace follow-on F2b) — a
+# p2panda-net node (gossip + log-sync over iroh/QUIC) plus its group-encryption assembly. Extracted
+# out of `noeta-host-real` so the heavy iroh/QUIC/p2panda tree no longer rides in the CLI runtime; the
+# `para.p2p` extension owns this node instead of `RealHost`. Depends only on `noeta-ext-abi` (for the
+# `P2p` trait it implements + `StdError`/`SyncStatus`) and the p2panda/tokio tree — nothing above it,
+# so it stays out of any dependency cycle with `noeta-host-real`.
+[package]
+name = "noeta-para-p2p-net"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nsrosenqvist/noeta"
+rust-version = "1.95"
+
+[dependencies]
+# file:// + rev is the pre-publish form; flips to { git = "https://github.com/noeta-lang/noeta", tag = "vX" } at publish.
+noeta-ext-abi = { git = "file:///home/niklas/Code/lang", rev = "6c32f8d05a273192dea4bedd46d5f22c57d52419" }
+# The node owns its OWN multi-thread runtime (persistent gossip/sync tasks outlive individual
+# dispatches — a current-thread `block_on`-per-call runtime cannot), plus mpsc for the drain channels.
+# Feature set = the monorepo workspace pin's features + this crate's additions.
+tokio = { version = "1", features = ["rt", "fs", "io-util", "time", "net", "rt-multi-thread", "sync", "macros"] }
+futures-util = "0.3"
+p2panda-net = "0.7"
+p2panda-core = "0.7"
+# `spaces` pulls the group-encryption store tables (SqliteSpacesStore) p2panda-spaces needs.
+p2panda-store = { version = "0.7", features = ["spaces"] }
+p2panda-sync = "0.7"
+p2panda-spaces = "0.7"
+p2panda-auth = "0.7"
+p2panda-encryption = { version = "0.7", features = ["data_scheme"] }
+# Serialize the node's group-encryption Credentials to disk (and, later, spaces ops for the wire).
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+# Inlined from the monorepo's [workspace.lints] (this crate is standalone now).
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace]

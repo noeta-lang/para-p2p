@@ -1,0 +1,27 @@
+# The native entry crate for the `para/p2p` package. Standalone (its own empty `[workspace]`)
+# so the composed toolchain can build it as a path dependency without adopting this repo's layout,
+# exactly like the generated shim. It re-exports the `noeta-para-p2p` crate's extension slice under
+# the fixed `NOETA_EXTENSIONS` convention.
+[package]
+name = "para-p2p-native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+# The impl crate lives in this repo (crates/noeta-para-p2p), so a clone builds the demo with no
+# network beyond the noeta toolchain git deps. The composed toolchain rewrites every noeta-repo git
+# crate to the consumer's exact toolchain source via a `[patch]` (see
+# `compose.rs::toolchain_patch_section`), so the `dyn Extension` types unify.
+noeta-para-p2p = { path = "../crates/noeta-para-p2p", default-features = false }
+
+# The real-transport ring, forwarded to the impl crate. Not default: the composed toolchain/runner
+# enables it (real networking for `noeta run`/`--exe`), and `noeta build --native`'s footprint scan
+# enables it only when the program imports `para.p2p`/`para.synced` — so a `--native` binary that
+# depends on this package but never touches its p2p modules links no p2panda (para-namespace F2b).
+[features]
+ring-p2p = ["noeta-para-p2p/ring-p2p"]
+
+[workspace]
