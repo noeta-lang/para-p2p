@@ -13,8 +13,8 @@ repository = "https://github.com/noeta-lang/para-p2p"
 rust-version = "1.95"
 
 [dependencies]
-# file:// + rev is the pre-publish form; flips to { git = "https://github.com/noeta-lang/noeta", tag = "vX" } at publish.
-noeta-ext-abi = { git = "file:///home/niklas/Code/lang", rev = "6c32f8d05a273192dea4bedd46d5f22c57d52419" }
+# rev-pinned to the public toolchain repo; flips to `tag = "vX"` once a toolchain release tag exists.
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", rev = "e33294f4e80b93baffb84673b00dad046fe6a4e4" }
 # The node owns its OWN multi-thread runtime (persistent gossip/sync tasks outlive individual
 # dispatches — a current-thread `block_on`-per-call runtime cannot), plus mpsc for the drain channels.
 # Feature set = the monorepo workspace pin's features + this crate's additions.

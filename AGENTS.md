@@ -15,9 +15,9 @@ Guidance for coding agents working in this repo — the standalone repo of the *
 
 ## Build & test
 
-- `cargo test` inside each `crates/*` member works standalone — the toolchain crates are git dependencies (currently the pre-publish `file:///home/niklas/Code/lang` form; flips to `https://github.com/noeta-lang/noeta` at publish). Plain builds/tests link **no** p2panda — the extension uses its dep-free loopback broker; `cargo check --features ring-p2p` in `crates/noeta-para-p2p` compiles the real-transport ring.
+- `cargo test` inside each `crates/*` member works standalone — the toolchain crates are git dependencies on `https://github.com/noeta-lang/noeta` (rev-pinned; flips to tag pins once a toolchain release tag exists). Plain builds/tests link **no** p2panda — the extension uses its dep-free loopback broker; `cargo check --features ring-p2p` in `crates/noeta-para-p2p` compiles the real-transport ring.
 - Running the example needs the `noeta` binary and **composes a toolchain** (the native crates are compiled in). Set:
-  - `NOETA_TOOLCHAIN_REPO=file:///home/niklas/Code/lang` — MUST equal the URL the crates' Cargo.toml declares, or the composed build links two copies of the extension ABI and every impl fails with a two-`Extension`-traits E0308;
+  - nothing, in the common case: the compose `[patch]` key defaults to the binary's baked repository URL (`https://github.com/noeta-lang/noeta`), which now equals the URL the crates' Cargo.toml declares. When overriding to a fork or local clone, `NOETA_TOOLCHAIN_REPO` MUST equal the declared URL, or the composed build links two copies of the extension ABI and every impl fails with a two-`Extension`-traits E0308;
   - optionally `NOETA_TOOLCHAIN_SRC=<path to a noeta checkout>` to skip the git fetch.
 - Then `noeta check` / `noeta test` / `noeta run` in `examples/para-p2p-demo/`.
 
