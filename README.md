@@ -50,10 +50,155 @@ seen = effect(fn() {
 x.merge(crdt.gcounter().increment("B", 5))
 ```
 
+## CRDTs — values that merge without coordination
+
+A CRDT is a value whose concurrent edits **merge** into the same result regardless of the order they arrive in, so replicas converge without a coordinator — and duplicated or out-of-order messages are harmless. CRDTs are ordinary immutable values: an update returns a *new* value, equality is by content, and they print for debugging (`<gcounter 7>`, `<gset [x, y]>`). Each carries a **replica id** — a string identifying the node that made a change — which you supply explicitly.
+
+| Constructor | Type | What it is |
+| --- | --- | --- |
+| `crdt.gcounter()` | `GCounter` | A grow-only counter (only increments). |
+| `crdt.pncounter()` | `PnCounter` | A counter that also decrements. |
+| `crdt.gset()` | `GSet` | A grow-only set of strings. |
+
+Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): List<string>` (sorted). Counters take `.increment(replica, by = 1)`, and `PnCounter` also `.decrement(replica, by = 1)`; amounts must be non-negative — a counter that needs to go down is a `PnCounter`, whose `value()` nets increments against decrements and may go negative.
+
+```noeta
+use para.{crdt}
+
+// A grow-only counter: merge takes the per-replica max, so independent increments sum.
+a = crdt.gcounter().increment("A", 3)
+b = crdt.gcounter().increment("B", 4)
+echo a.merge(b).value()                     // 7 — and a.merge(b) == b.merge(a)
+
+// A PN-counter tracks both directions per replica.
+c = crdt.pncounter().increment("A", 10).decrement("A", 3)
+echo c.value()                              // 7
+
+// A grow-only set converges by union.
+s = crdt.gset().insert("x").insert("y").merge(crdt.gset().insert("z"))
+echo s.members()                            // ["x", "y", "z"]
+```
+
+`.merge` only accepts the **same** CRDT type — `gcounter().merge(gset())` is a compile error, not a runtime surprise.
+
+## Peer-to-peer messaging — `para.p2p`
+
+`para.p2p` is the transport underneath synced state: publish a message to a **topic**, receive messages other peers published to it. Messages are opaque bytes (a string rides as its UTF-8), so any payload — including serialized CRDT state — travels over it.
+
+| Function | Signature | Behavior |
+| --- | --- | --- |
+| `p2p.publish` | `(topic: string, message: string \| bytes)` | Broadcast to everyone subscribed to the topic. |
+| `p2p.receive` | `(topic: string) -> Future<?bytes>` | The next message — `.await` it; `none` once the topic has drained. |
+| `p2p.identity` | `() -> ?string` | This node's stable identity (the hex Ed25519 public key it signs with); `none` under the loopback broker, which has no network identity. |
+
+Topics are independent channels: every subscriber sees every message, and receiving from an empty topic yields `none` immediately, so a drain loop terminates:
+
+```noeta
+use para.{p2p}
+
+async fn drain(): void {
+    p2p.publish("room", "hello")
+    p2p.publish("room", "world")
+    mut running = true
+    while running {
+        msg = p2p.receive("room").await
+        (hex, keep) = match msg {
+            some(bytes) => (bytes.to_hex(), true),
+            none => ("", false),
+        }
+        if keep { echo hex }
+        running = keep
+    }
+}
+```
+
+## Synced signals — reactive state shared across peers
+
+A `synced_signal(initial, topic)` fuses the layers: a reactive signal whose value is a CRDT and whose changes replicate over a p2p topic. Its value type must be `Mergeable` — i.e. a CRDT — enforced at compile time, so you can never sync a value with no convergence story (`synced_signal(42, "t")` is a type error). Because a synced signal is a node in the *same* reactive graph as `signal`/`computed`/`effect`, a peer's merge propagates to dependents exactly like a local update.
+
+The surface is a signal you converge rather than overwrite:
+
+| Method | Behavior |
+| --- | --- |
+| `.get(): T` | The current merged value; a read inside a `computed`/`effect` subscribes to it. |
+| `.merge(delta: T)` | Merge `delta` into the local value, rerun dependents, and **publish** the new state to peers. |
+| `.sync()` | **Pull**: drain the topic, merge every peer state in, and rerun dependents once if anything changed. |
+| `.status(): string` | This replica's convergence state for its topic: `"synced"` / `"syncing"` / `"offline"`. |
+
+`.sync()` is deliberately explicit — the network boundary stays visible, so it is legible in your code exactly where remote state enters, rather than hiding behind every read. Two `synced_signal`s on one topic in the same program are two replicas that converge through the transport:
+
+```noeta
+use para.{crdt}
+use std.reactive.{effect}
+use para.synced.{synced_signal}
+
+a = synced_signal(crdt.gcounter().increment("A", 1), "counter")
+b = synced_signal(crdt.gcounter().increment("B", 2), "counter")
+
+e = effect(fn() {
+    echo "effect sees a=${a.get().value()}"     // prints 1 on creation
+})
+
+a.sync()                                        // merges b's state → 3; the effect reruns
+b.sync()
+echo "final a=${a.get().value()} b=${b.get().value()}"   // 3 == 3
+```
+
+`.status()` is always `"synced"` under the loopback broker (a single node never lags); over a real network it reports genuine offline/sync state — e.g. an `effect` rendering "working offline".
+
+## Encrypted groups — end-to-end encryption with dynamic membership
+
+A third argument — a **member set** of peer-id strings — makes a synced signal end-to-end encrypted to exactly those peers. Every state it publishes crosses the wire encrypted; a node outside the set sees only ciphertext. The members are given at construction, so the very first state announced to the topic is already encrypted — there is no window where it goes out in the clear.
+
+```noeta
+use para.{crdt}
+use para.synced.{synced_signal}
+
+members = ["alice", "bob"]                  // peer ids — their p2p.identity() strings
+tally = synced_signal(crdt.gcounter(), "team/tally", members)
+tally.merge(crdt.gcounter().increment("alice", 1))   // encrypted before it leaves the node
+tally.sync()                                          // decrypts peers' state in
+
+tally.add_member("carol")     // carol can now read new state
+tally.remove_member("bob")    // the group key rotates — bob stops decrypting anything published from now on
+```
+
+`.add_member(peer_id)` admits a peer; `.remove_member(peer_id)` revokes one and **rotates the group key**. The group creator is authoritative over membership. Under the real transport this is backed by p2panda's group encryption (a symmetric group key — XChaCha20-Poly1305 — with the property that a member who joins late can still decrypt prior state, exactly what a convergent CRDT needs). Encryption is transparent to your program: `.get()` returns the same converged value it would without it, so the deterministic loopback treats an encrypted signal as a pass-through and an encrypted program behaves identically on both backends.
+
+> [!WARNING]
+> `.add_member` / `.remove_member` are only valid on an encrypted signal — one created with a members list. Calling them on a plaintext signal is a runtime error. There is no way to declare members without encryption: members-imply-encryption is the safe default.
+
+## Convergence semantics — what merge guarantees
+
+Merge is a lattice join, property-tested in `crates/noeta-crdt` for the three CRDT laws:
+
+1. **commutativity** — `a.merge(b) == b.merge(a)`
+2. **associativity** — `(a.merge(b)).merge(c) == a.merge(b.merge(c))`
+3. **idempotence** — `a.merge(a) == a`
+
+Together these mean replicas may exchange state in any order, with any duplication (a node re-merging its own echoes included), and still land on the same value. Practical consequences:
+
+- Merging a state already reflected is a no-op, so `.sync()` never spuriously reruns your effects — dependents wake only when the value actually changed.
+- A malformed or cross-type message received from a peer is untrusted input: `.sync()` skips it rather than aborting.
+- Merging two *different* CRDT types is rejected — statically on direct `.merge` calls, and as a clean runtime error (`cannot merge CRDT values of different types`) at the sync engine's dynamic seam.
+- There is no "set": a CRDT-backed signal has no way to overwrite, only to converge. Deletion needs a CRDT that can represent it (`PnCounter` can go down; `GSet` cannot forget).
+
+## Transport & persistence — the loopback broker and the real node
+
+The backend is chosen per run by the host's real-networking policy, and both implement the same `P2p` capability, so your program is identical either way:
+
+- **Loopback broker** — a deterministic in-process, per-topic FIFO log. Used on hosts that permit no real networking (the sandbox, tests) and in builds without the `ring-p2p` feature. Publish-then-receive drains in publish order and terminates, so p2p programs are testable and reproducible; two synced signals on one topic model two peers deterministically.
+- **Real p2panda node** (`ring-p2p`) — a live p2panda-net node: mDNS peer discovery, NAT-traversing QUIC via iroh, gossip pub/sub, and eventual-consistency **log-sync** backing `synced_signal` — every state a replica publishes appends to a durable, signed operation log, so a late-joining peer syncs the full history and converges from it.
+
+The real node is **persistent by default**: its Ed25519 identity (`identity.key`, the value `p2p.identity()` returns) and durable operation store (`store.db`) live in a per-app data directory, so a `noeta run` of a p2p program keeps its identity and synced logs across restarts with zero configuration. The directory resolves as `$XDG_DATA_HOME/<app>/p2p`, where `<app>` is `$NOETA_P2P_APP` if set, else the project's package name (or a distributed binary's own file stem); `$NOETA_P2P_DIR` (an absolute path) overrides everything. Two Noeta apps on one machine never share an identity or store.
+
+> [!NOTE]
+> `p2p.identity()` returns `none` and `.status()` is always `"synced"` under the loopback broker — deliberate, so a program that reads them behaves identically on both backends.
+
 ## Examples
 
 - [`examples/para-p2p-demo/`](examples/para-p2p-demo) — CRDTs, a synced signal, and the reactivity integration in one program.
-- [`crates/noeta-para-p2p/tests/conformance/`](crates/noeta-para-p2p/tests/conformance) — the `.noe` conformance fixtures (crdt / p2p / synced) the crate's test harness runs with the extension registered.
+- [`crates/noeta-para-p2p/tests/conformance/`](crates/noeta-para-p2p/tests/conformance) — the `.noe` conformance fixtures (crdt / p2p / synced) the crate's test harness runs with the extension registered; a runnable spec of every behavior above, convergence and encryption included.
 
 The full design write-up is in [`docs/Local-First-and-P2P.md`](docs/Local-First-and-P2P.md).
 
