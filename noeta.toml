@@ -1,8 +1,10 @@
 [package]
 name = "para/p2p"
-version = "0.1.1"
+version = "0.1.2"
 # The minimum noeta this package works with; enforced at resolve time from noeta 0.2.1 on.
 toolchain = ">=0.2"
+description = "Peer-to-peer networking over QUIC with end-to-end group encryption and CRDT sync."
+keywords = ["p2p", "networking", "quic", "encryption", "crdt"]
 # This package ships a native Rust extension crate (the `para.p2p`/`para.crdt`/`para.synced`
 # surface). A consumer must authorize it under `[trust] native = ["para/p2p"]`.
 native = "native"
