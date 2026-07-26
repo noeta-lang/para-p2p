@@ -3,9 +3,9 @@ version = 2
 
 [[package]]
 name = "para/p2p"
-version = "0.1.2"
+version = "0.1.3"
 source = "path"
 path = "../.."
 native = "native"
 edition = "2026"
-hash = "f7e3088c00f06b41db0f23e7dd81844608ce252241f3c9e5fa71ab1e0da47a49"
+hash = "cab9084aae3a20634c1872a2a5ff978165327b3785b8a33ad169e03eed038959"
