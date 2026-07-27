@@ -118,23 +118,27 @@ pub const SYNCED_CTX_FNS: &[ExtFn] = &[ExtFn {
         SigType::Optional(&MEMBERS),
     ],
     ret: RetTy::Concrete(SigType::Generic(SYNCED_SIGNAL_TYPE_NAME, &[VAR_A])),
-}];
+                                           ..ExtFn::DEFAULTS
+                                       }];
 
 pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
     ExtFn {
         name: "get",
         params: &[],
         ret: RetTy::Concrete(VAR_A),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "merge",
         params: &[VAR_A],
         ret: RetTy::Concrete(SigType::Unit),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "sync",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
+        ..ExtFn::DEFAULTS
     },
     // `.status() -> string` — this replica's convergence state for its topic (p2p P3.3): one of
     // `"synced"` / `"syncing"` / `"offline"`. Always `"synced"` under the deterministic sandbox
@@ -144,6 +148,7 @@ pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
         name: "status",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
+        ..ExtFn::DEFAULTS
     },
     // `.add_member(peer_id)` / `.remove_member(peer_id)` — runtime membership changes for an
     // encrypted group (p2p P3.4b). `remove` rotates the group key so the removed peer stops
@@ -153,11 +158,13 @@ pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
         name: "add_member",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "remove_member",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
+        ..ExtFn::DEFAULTS
     },
 ];
 

@@ -30,6 +30,7 @@ pub const P2P_FNS: &[ExtFn] = &[
         name: "publish",
         params: &[SigType::String, MESSAGE_SIG],
         ret: RetTy::Concrete(SigType::Unit),
+        ..ExtFn::DEFAULTS
     },
     // `receive(topic) -> Future<?bytes>` — the next message on `topic` (`some(bytes)`), or `none`
     // once the topic has drained. Async: `.await` it.
@@ -37,6 +38,7 @@ pub const P2P_FNS: &[ExtFn] = &[
         name: "receive",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Future(&SigType::Option(&SigType::Bytes))),
+        ..ExtFn::DEFAULTS
     },
     // `identity() -> ?string` — this node's stable identity, the hex Ed25519 public key it signs
     // with, persisted across restarts (p2p P3.3). `none` on the deterministic sandbox/loopback,
@@ -45,6 +47,7 @@ pub const P2P_FNS: &[ExtFn] = &[
         name: "identity",
         params: &[],
         ret: RetTy::Concrete(SigType::Option(&SigType::String)),
+        ..ExtFn::DEFAULTS
     },
 ];
 

@@ -55,16 +55,19 @@ pub const CRDT_FNS: &[ExtFn] = &[
         name: "gcounter",
         params: &[],
         ret: RetTy::Concrete(GCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "pncounter",
         params: &[],
         ret: RetTy::Concrete(PNCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "gset",
         params: &[],
         ret: RetTy::Concrete(GSET_SIG),
+        ..ExtFn::DEFAULTS
     },
 ];
 
@@ -103,16 +106,19 @@ pub const GCOUNTER_METHODS: &[ExtFn] = &[
         name: "increment",
         params: &[SigType::String, SigType::Optional(&SigType::Int)],
         ret: RetTy::Concrete(GCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "value",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "merge",
         params: &[GCOUNTER_SIG],
         ret: RetTy::Concrete(GCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
 ];
 
@@ -181,21 +187,25 @@ pub const PNCOUNTER_METHODS: &[ExtFn] = &[
         name: "increment",
         params: &[SigType::String, SigType::Optional(&SigType::Int)],
         ret: RetTy::Concrete(PNCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "decrement",
         params: &[SigType::String, SigType::Optional(&SigType::Int)],
         ret: RetTy::Concrete(PNCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "value",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "merge",
         params: &[PNCOUNTER_SIG],
         ret: RetTy::Concrete(PNCOUNTER_SIG),
+        ..ExtFn::DEFAULTS
     },
 ];
 
@@ -269,26 +279,31 @@ pub const GSET_METHODS: &[ExtFn] = &[
         name: "insert",
         params: &[SigType::String],
         ret: RetTy::Concrete(GSET_SIG),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "contains",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Bool),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "len",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "members",
         params: &[],
         ret: RetTy::Concrete(SigType::List(&SigType::String)),
+        ..ExtFn::DEFAULTS
     },
     ExtFn {
         name: "merge",
         params: &[GSET_SIG],
         ret: RetTy::Concrete(GSET_SIG),
+        ..ExtFn::DEFAULTS
     },
 ];
 
