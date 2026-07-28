@@ -21,7 +21,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use noeta_crdt::Mergeable;
-use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::registry::{ExtFn, ExtTrait, ExtTraitMethod, NativeOut, RetTy, SigType};
 use noeta_ext_abi::{
     ErrorKind, ExternValue, Host, NativeValue, Scalar, StdError, arity_error, no_function_error,
     no_method_error, type_error,
@@ -37,11 +37,56 @@ pub const GCOUNTER_TYPE_IDENTITY: &str = "para.crdt.GCounter";
 pub const PNCOUNTER_TYPE_IDENTITY: &str = "para.crdt.PnCounter";
 pub const GSET_TYPE_IDENTITY: &str = "para.crdt.GSet";
 
-/// The built-in traits every CRDT extern type declares (p2p P2): `Mergeable` — the convergence
-/// capability that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound
-/// on `synced_signal`. This is the extern-type analogue of a user type's `@derive`, seeded into the
+/// The traits every CRDT extern type declares: [`MERGEABLE_TRAIT`] — the convergence capability
+/// that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound on
+/// `synced_signal`. This is the extern-type analogue of a user type's `impl`, seeded into the
 /// checker's trait table from the registry.
-pub const CRDT_TRAITS: &[&str] = &["Mergeable"];
+pub const CRDT_TRAITS: &[&str] = &[MERGEABLE_TRAIT_NAME];
+
+/// `Mergeable`'s short name and qualified identity. The trait lives under `para.crdt` beside the
+/// three CRDTs, so `use para.{crdt}` brings it into scope with them.
+pub const MERGEABLE_TRAIT_NAME: &str = "Mergeable";
+pub const MERGEABLE_TRAIT_IDENTITY: &str = "para.crdt.Mergeable";
+
+/// **`Mergeable`** — the convergence contract, as a first-class native trait rather than a closed
+/// built-in.
+///
+/// It was a checker-intrinsic `BuiltinTrait` that only these three extern types could satisfy, with
+/// a user `impl` rejected outright, on the reasoning that a value claiming the bound with no real
+/// merge would pass the checker and then have nothing to call at the sync seam. That is a genuine
+/// hazard, but closing the trait was too blunt an answer to it: this package ships exactly three
+/// CRDTs, and an app needing a fourth — an LWW register, a set that can delete — had no way to
+/// supply one however correct its merge.
+///
+/// A required method answers the hazard directly. `merge` carries no default, so an implementing
+/// type must supply it or the impl is E0015 — there is no way to claim the bound and leave the seam
+/// with nothing to call. The three laws (commutative, associative, idempotent) remain the
+/// implementor's responsibility, exactly as they are for the built-in three, which no type system
+/// checks either — they are property-tested in `noeta-crdt`, and a user's type wants the same.
+pub const MERGEABLE_TRAIT: ExtTrait = ExtTrait {
+    name: MERGEABLE_TRAIT_NAME,
+    // Equal to the module the CRDTs live in, so the `impl Mergeable` surface and the runtime
+    // dispatch route resolve to one identity (the `std.vec.Kernels` convention).
+    namespace: "para.crdt",
+    methods: MERGEABLE_METHODS,
+    ..ExtTrait::DEFAULTS
+};
+
+/// `merge(other: Self): Self` — required (`ExtTraitMethod::DEFAULTS` is a required, `Self`-receiver
+/// method), and deliberately the *whole* contract. Serialization is not part of it: state crosses
+/// the wire through the sync engine, which knows how to encode a native CRDT and a language value
+/// respectively, so demanding a `to_bytes` here would push an encoding decision onto every
+/// implementor for no gain.
+const MERGEABLE_METHODS: &[ExtTraitMethod] = &[ExtTraitMethod {
+    sig: ExtFn {
+        param_names: &["other"],
+        name: "merge",
+        params: &[SigType::SelfTy],
+        ret: RetTy::Concrete(SigType::SelfTy),
+        ..ExtFn::DEFAULTS
+    },
+    ..ExtTraitMethod::DEFAULTS
+}];
 
 const GCOUNTER_SIG: SigType = SigType::Named(GCOUNTER_TYPE_NAME);
 const PNCOUNTER_SIG: SigType = SigType::Named(PNCOUNTER_TYPE_NAME);

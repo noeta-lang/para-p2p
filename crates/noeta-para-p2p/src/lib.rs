@@ -21,7 +21,7 @@ pub mod p2p;
 pub mod provider;
 pub mod synced;
 
-use noeta_ext_abi::registry::{ExtModule, ExtType, Extension};
+use noeta_ext_abi::registry::{ExtModule, ExtTrait, ExtType, Extension};
 
 // `P2p` left the mandatory `Host` union (para-namespace arc): `para.p2p`/`para.synced` reach the
 // capability through [`crate::provider`], which prefers the host's real transport (`P2pProvider`)
@@ -47,6 +47,12 @@ impl Extension for ParaP2pExtension {
     fn types(&self) -> &'static [ExtType] {
         PARA_P2P_TYPES
     }
+    /// The package's first-class traits: `para.crdt.Mergeable`, the convergence contract the three
+    /// CRDT types advertise through `CRDT_TRAITS` and an app's own CRDT satisfies with an ordinary
+    /// `impl` (see [`crate::crdt::MERGEABLE_TRAIT`]).
+    fn traits(&self) -> &'static [ExtTrait] {
+        PARA_P2P_TRAITS
+    }
     /// The `ViewSourceExtract` capability the reactive engine's `view.expose` resolves a
     /// `SyncedSignal` through (see [`synced::SYNCED_CAPABILITIES`]) — declared on the unit so it is
     /// scoped to whatever registry this extension is assembled into.
@@ -59,6 +65,8 @@ impl Extension for ParaP2pExtension {
 /// entry crate re-exports this slice, the composed toolchain aggregates every dependency's slice and
 /// installs the union into the runtime registry.
 pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ParaP2pExtension];
+
+const PARA_P2P_TRAITS: &[ExtTrait] = &[crate::crdt::MERGEABLE_TRAIT];
 
 /// The `para.p2p` modules — CRDT constructors (P0), the `p2p` host capability (P1), and the
 /// `synced` CRDT-backed reactive signal (P2).
