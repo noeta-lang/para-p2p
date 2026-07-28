@@ -1,3 +1,7 @@
 target/
 .target-check/
 Cargo.lock
+
+# Example projects are demos, not package roots — their lockfiles
+# regenerate on every run and are not meant to be committed.
+examples/*/noeta.lock
