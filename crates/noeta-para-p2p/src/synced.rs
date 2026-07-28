@@ -107,13 +107,13 @@ const VAR_A: SigType = SigType::Var(0);
 const MEMBERS: SigType = SigType::List(&SigType::String);
 
 /// `synced_signal(initial: T, topic: string, members?: List<string>) -> SyncedSignal<T>` where
-/// `T: Mergeable` — the bound is the compile-time guarantee that only a CRDT may be synced (p2p
-/// P2.M). The optional `members` list opts the signal into an encrypted group (p2p P3.4b); given at
+/// `T: Mergeable + Syncable` — the bound is the compile-time guarantee that a synced value both
+/// converges and knows how to cross the wire (p2p P2.M). The optional `members` list opts the signal into an encrypted group (p2p P3.4b); given at
 /// construction so the very first state announced to the topic is already encrypted.
 pub const SYNCED_CTX_FNS: &[ExtFn] = &[ExtFn {
     name: "synced_signal",
     params: &[
-        SigType::BoundedVar(0, "Mergeable"),
+        SigType::BoundedVar(0, &["Mergeable", "Syncable"]),
         SigType::String,
         SigType::Optional(&MEMBERS),
     ],
@@ -257,11 +257,11 @@ pub fn synced_ctx_dispatch(
                 },
                 None => Vec::new(),
             };
-            // Serialize the initial state (and validate it really is a CRDT — the `Mergeable` bound
-            // makes this hold statically, but a `dyn`-laundered value could still arrive).
-            let bytes = clone_crdt(ctx, args[0])
-                .and_then(|v| to_bytes_dyn(&*v))
-                .ok_or_else(not_a_crdt)?;
+            // Serialize the initial state (and validate it really is syncable — the
+            // `Mergeable + Syncable` bound makes this hold statically, but a `dyn`-laundered value
+            // could still arrive). Goes through the same seam as every other encode, so a native
+            // CRDT and a language value implementing `Syncable` are both accepted here.
+            let bytes = slot_to_bytes(ctx, args[0])?;
             // Subscribe first (cursor at the log start), then announce the initial state, so another
             // replica that later subscribes still sees it and converges. An encrypted group
             // (`members` given) routes through the group transport, which encrypts the announce to
@@ -315,12 +315,8 @@ pub fn synced_ctx_method_dispatch(
         "merge" => {
             ctx_arity(method, args, 1)?;
             let current_slot = ctx.retained_get(handle.cell)?;
-            let current = clone_crdt(ctx, current_slot).ok_or_else(not_a_crdt)?;
-            let delta =
-                clone_crdt(ctx, args[0]).ok_or_else(|| type_error("merge", "a CRDT delta"))?;
-            let merged = merge_dyn(&*current, &*delta).ok_or_else(mismatched_merge)?;
-            let bytes = to_bytes_dyn(&*merged).ok_or_else(not_a_crdt)?;
-            let merged_slot = ctx.intern(NativeOut::Extern(ExternBox(merged)))?;
+            let merged_slot = merge_slots(ctx, current_slot, args[0])?;
+            let bytes = slot_to_bytes(ctx, merged_slot)?;
             ctx.retained_set(handle.cell, merged_slot)?;
             ctx.free(merged_slot);
             ctx.free(current_slot);
@@ -348,16 +344,16 @@ pub fn synced_ctx_method_dispatch(
                 }
             })? {
                 let current_slot = ctx.retained_get(handle.cell)?;
-                let current = clone_crdt(ctx, current_slot).ok_or_else(not_a_crdt)?;
                 // A malformed / cross-type message is untrusted input — skip it, do not abort.
-                if let Some(peer) = from_bytes_like(&*current, &bytes) {
-                    let merged = merge_dyn(&*current, &*peer).ok_or_else(mismatched_merge)?;
-                    if !merged.eq_value(&*current) {
-                        let merged_slot = ctx.intern(NativeOut::Extern(ExternBox(merged)))?;
+                if let Some(merged_slot) = merge_peer_bytes(ctx, current_slot, &bytes)? {
+                    // Merging state already reflected is a CRDT no-op, so compare before waking:
+                    // an unchanged value must not rerun dependent effects. `values_equal` serves a
+                    // native extern value and a language object alike.
+                    if !ctx.values_equal(current_slot, merged_slot)? {
                         ctx.retained_set(handle.cell, merged_slot)?;
-                        ctx.free(merged_slot);
                         changed = true;
                     }
+                    ctx.free(merged_slot);
                 }
                 ctx.free(current_slot);
             }
@@ -411,6 +407,93 @@ fn handle_of<C: NativeCtx + ?Sized>(ctx: &mut C, recv: Slot) -> CtxResult<Synced
 }
 
 /// Clone a slot's value out as a boxed CRDT extern value, or `None` if it is not an extern CRDT.
+// --- The value seam: a native CRDT or a user type implementing the traits ---------------------
+//
+// The engine used to assume its value was one of the three Rust CRDTs and downcast to reach it.
+// Now that `Mergeable`/`Syncable` are ordinary traits, the value may equally be a language object
+// whose `merge`/`to_bytes`/`merge_bytes` are written in Noeta. Each helper below tries the native
+// path and falls back to calling the contract's method — one seam, both kinds, so every caller
+// stays written once.
+
+/// Merge `delta` into `current`, yielding a fresh owned slot.
+fn merge_slots<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    current: Slot,
+    delta: Slot,
+) -> Result<Slot, CtxError> {
+    if let (Some(a), Some(b)) = (clone_crdt(ctx, current), clone_crdt(ctx, delta)) {
+        let merged = merge_dyn(&*a, &*b).ok_or_else(mismatched_merge)?;
+        return ctx.intern(NativeOut::Extern(ExternBox(merged)));
+    }
+    // A user `Mergeable`. Its `merge` is the contract's required method, so a receiver that
+    // reaches here without one is not a CRDT at all.
+    ctx.call_method(current, "merge", &[delta])?
+        .ok_or_else(not_a_crdt)
+}
+
+/// This value's full state for the wire.
+fn slot_to_bytes<C: NativeCtx + ?Sized>(ctx: &mut C, value: Slot) -> Result<Vec<u8>, CtxError> {
+    if let Some(c) = clone_crdt(ctx, value) {
+        return to_bytes_dyn(&*c).ok_or_else(not_a_crdt);
+    }
+    let encoded = ctx
+        .call_method(value, "to_bytes", &[])?
+        .ok_or_else(not_syncable)?;
+    // Read the payload, not `view`'s projection: the deep view renders bytes as a summary string
+    // (`"<12 bytes>"`) so display/JSON can never panic on binary, which would silently publish
+    // that summary instead of the state.
+    let bytes = ctx.bytes_of(encoded)?;
+    ctx.free(encoded);
+    // `Syncable` declares `to_bytes(): bytes`, so anything else is an implementor bug rather than
+    // untrusted input — name it instead of publishing nothing.
+    bytes.ok_or_else(|| bad_encoding("to_bytes must return bytes"))
+}
+
+/// Merge a peer's encoded state into `current`. `Ok(None)` = the payload was not decodable as this
+/// value's type, which is an ordinary outcome for untrusted input, not an error.
+fn merge_peer_bytes<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    current: Slot,
+    bytes: &[u8],
+) -> Result<Option<Slot>, CtxError> {
+    if let Some(c) = clone_crdt(ctx, current) {
+        let Some(peer) = from_bytes_like(&*c, bytes) else {
+            return Ok(None);
+        };
+        let merged = merge_dyn(&*c, &*peer).ok_or_else(mismatched_merge)?;
+        return Ok(Some(ctx.intern(NativeOut::Extern(ExternBox(merged)))?));
+    }
+    // `Syncable::merge_bytes` decodes and merges in one step — the engine always holds the current
+    // value when peer state arrives, so no static constructor is needed. An implementor answers a
+    // malformed payload by returning itself unchanged, which the caller's equality check then
+    // reads as "nothing changed".
+    let encoded = ctx.intern(NativeOut::Bytes(bytes.to_vec()))?;
+    let merged = ctx.call_method(current, "merge_bytes", &[encoded])?;
+    ctx.free(encoded);
+    match merged {
+        Some(slot) => Ok(Some(slot)),
+        None => Err(not_syncable()),
+    }
+}
+
+fn not_syncable() -> CtxError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: "this value cannot be synced: it does not implement `Syncable` \
+                  (`to_bytes` / `merge_bytes`)"
+            .to_string(),
+    }
+    .into()
+}
+
+fn bad_encoding(what: &str) -> CtxError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: format!("`Syncable` implementation is malformed: {what}"),
+    }
+    .into()
+}
+
 fn clone_crdt<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> Option<Box<dyn ExternValue>> {
     let mut cloned = None;
     // `with_extern` errs on a non-extern slot; treat that as "not a CRDT" (None).
@@ -425,7 +508,9 @@ fn clone_crdt<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> Option<Box<dyn 
 fn not_a_crdt() -> CtxError {
     StdError {
         kind: ErrorKind::ArgType,
-        message: "a synced value must be a CRDT (`GCounter`/`PnCounter`/`GSet`)".to_string(),
+        message: "a synced value must be a CRDT: one of `para.crdt`'s own types, or a type \
+                  implementing `Mergeable` + `Syncable`"
+            .to_string(),
     }
     .into()
 }

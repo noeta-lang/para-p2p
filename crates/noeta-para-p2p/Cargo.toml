@@ -11,6 +11,11 @@ rust-version = "1.95"
 noeta-crdt = { path = "../noeta-crdt" }
 # Pinned to the toolchain release this package version is built against.
 noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+# The document CRDT behind `para.crdt.AutoDoc` (see `autodoc.rs`). p2panda ships no application
+# CRDT by design ("compatible with any application data and CRDT"), so the value layer is ours to
+# choose; automerge's save/load/merge match this package's `Syncable`/`Mergeable` contracts
+# directly, so it drops in as a value rather than as a second sync stack.
+automerge = "0.10"
 # `synced` is a node in the SAME reactive graph as core `std.reactive`, reached through the
 # `ReactiveSource` **capability** (`noeta_ext_abi::capability::<dyn ReactiveSource>`): create_source /
 # read_source / wake + the view-source hook — never the engine internals. The contract lives in the

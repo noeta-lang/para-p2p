@@ -8,7 +8,7 @@ This package is **fully native**: its whole surface is a Rust extension (there i
 
 Three modules, all rooted at `para`:
 
-- **`para.crdt`** — state-based CRDT value types: `crdt.gcounter()`, `crdt.pncounter()`, `crdt.gset()`. Merge is commutative, associative, and idempotent, so independent replicas converge to the same value regardless of the order or duplication of the updates they exchange.
+- **`para.crdt`** — state-based CRDT value types: `crdt.gcounter()`, `crdt.pncounter()`, `crdt.gset()`, and the Automerge-backed document `crdt.automerge()`. Merge is commutative, associative, and idempotent, so independent replicas converge to the same value regardless of the order or duplication of the updates they exchange. The set is **open**: `Mergeable` and `Syncable` are ordinary traits your own type can implement.
 - **`para.p2p`** — `publish` / `receive` / `identity` over the `P2p` host capability. With the real transport (the `ring-p2p` feature of the extension crate) that is a live p2panda node — gossip + log-sync over iroh/QUIC; without it, a deterministic in-process loopback broker, so plain builds and tests never link the networking tree.
 - **`para.synced`** — `synced_signal(crdt, topic)`: a CRDT-backed signal that is a node in the **same** reactive graph as core `std.reactive` — a merge (local or from a peer) reruns dependent `computed`/`effect`s. Over the real transport it adds end-to-end group encryption and dynamic membership.
 
@@ -59,6 +59,16 @@ A CRDT is a value whose concurrent edits **merge** into the same result regardle
 | `crdt.gcounter()` | `GCounter` | A grow-only counter (only increments). |
 | `crdt.pncounter()` | `PnCounter` | A counter that also decrements. |
 | `crdt.gset()` | `GSet` | A grow-only set of strings. |
+| `crdt.automerge()` | `AutoDoc` | An Automerge document — a string map that can **update and delete**. |
+
+`AutoDoc` is the one to reach for when a grow-only lattice cannot express your data. The three above can only ever *gain* information — that is what makes their merge a lattice join — so none of them can represent removing or overwriting a value. `AutoDoc` can: `.put(key, value)`, `.get(key): ?string`, `.remove(key)`, `.keys(): List<string>`. Concurrent writes to different keys both survive; concurrent writes to the same key resolve identically on every replica.
+
+```noeta
+doc = crdt.automerge().put("title", "draft").put("author", "ada")
+echo doc.remove("author").keys()          // ["title"] — a deletion that converges
+```
+
+It is backed by [Automerge](https://automerge.org), not hand-rolled: p2panda ships no application CRDT by design (`p2panda-core` is "compatible with any application data and CRDT"), so the value layer is the consumer's to choose, and Automerge's `save`/`load`/`merge` match this package's `Syncable`/`Mergeable` contracts directly. The transport, log-sync and encryption stay p2panda's. The surface is deliberately a string map for now — nested maps, lists and rich text are the obvious follow-on.
 
 Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): List<string>` (sorted). Counters take `.increment(replica, by = 1)`, and `PnCounter` also `.decrement(replica, by = 1)`; amounts must be non-negative — a counter that needs to go down is a `PnCounter`, whose `value()` nets increments against decrements and may go negative.
 
@@ -80,6 +90,46 @@ echo s.members()                            // ["x", "y", "z"]
 ```
 
 `.merge` only accepts the **same** CRDT type — `gcounter().merge(gset())` is a compile error, not a runtime surprise.
+
+## Your own CRDT — `Mergeable` and `Syncable`
+
+The four above are not the whole world, and the traits behind them are ordinary ones your type can implement:
+
+```noeta
+use para.crdt.{Mergeable, Syncable}
+
+// A last-write-wins register, which this package does not ship.
+class Lww {
+    pub at: int
+    pub value: string
+
+    fn new(at: int, value: string): Lww { return Lww { at: at, value: value } }
+
+    impl Mergeable {
+        fn merge(other: Lww): Lww {
+            return if other.at > self.at then other else self
+        }
+    }
+    impl Syncable {
+        fn to_bytes(): bytes { return "${self.at}|${self.value}".to_bytes() }
+        fn merge_bytes(other: bytes): Lww {
+            parts = (other.decode() ?? "").split("|", 2)
+            at = if parts.len() > 0 then parts[0].to_int() ?? 0 else 0
+            text = if parts.len() > 1 then parts[1] else ""
+            return self.merge(Lww.new(at, text))
+        }
+    }
+}
+
+x = synced_signal(Lww.new(1, "hello"), "topic")   // accepted like any built-in
+```
+
+**Why two traits.** Converging and being replicated are different capabilities. A value can merge usefully in-process and never leave it, and making that value justify a wire encoding would tax the common case. So `Mergeable` is `merge` alone, `Syncable` adds the wire, and `synced_signal` asks for both — a type that merges but has no encoding is refused *naming `Syncable`*, rather than with a vague "not a CRDT".
+
+`Syncable`'s contract is instance-only for a concrete reason: a trait method has a `Self` receiver, so there is nowhere to hang a static `from_bytes`. Decoding folds into `merge_bytes` — "decode a peer's state and merge it into me" — which the engine can always call, because it holds the current value when peer state arrives. It also degrades well: answer a malformed payload by returning yourself unchanged, and the engine reads that as "nothing changed".
+
+> [!WARNING]
+> The checker enforces that you **supplied** a `merge`, not that it is commutative, associative and idempotent. No type system can check that. The four built-ins are property-tested for the three laws in `crates/noeta-crdt` and `autodoc.rs`; your type deserves the same treatment, because a merge that violates them diverges silently — replicas simply stop agreeing, with nothing to catch it.
 
 ## Peer-to-peer messaging — `para.p2p`
 
@@ -114,7 +164,7 @@ async fn drain(): void {
 
 ## Synced signals — reactive state shared across peers
 
-A `synced_signal(initial, topic)` fuses the layers: a reactive signal whose value is a CRDT and whose changes replicate over a p2p topic. Its value type must be `Mergeable` — i.e. a CRDT — enforced at compile time, so you can never sync a value with no convergence story (`synced_signal(42, "t")` is a type error). Because a synced signal is a node in the *same* reactive graph as `signal`/`computed`/`effect`, a peer's merge propagates to dependents exactly like a local update.
+A `synced_signal(initial, topic)` fuses the layers: a reactive signal whose value is a CRDT and whose changes replicate over a p2p topic. Its value type must be `Mergeable + Syncable` — it has to converge *and* know how to cross the wire — enforced at compile time, so you can never sync a value with no convergence story (`synced_signal(42, "t")` is a type error), nor one that converges but cannot be transmitted. Because a synced signal is a node in the *same* reactive graph as `signal`/`computed`/`effect`, a peer's merge propagates to dependents exactly like a local update.
 
 The surface is a signal you converge rather than overwrite:
 

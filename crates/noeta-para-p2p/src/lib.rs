@@ -16,6 +16,7 @@
 //! the `P2p` host capability, so a program that never imports `para.p2p`/`para.synced` still sheds
 //! the whole iroh/QUIC tree from its shipped binary.
 
+pub mod autodoc;
 pub mod crdt;
 pub mod p2p;
 pub mod provider;
@@ -66,7 +67,7 @@ impl Extension for ParaP2pExtension {
 /// installs the union into the runtime registry.
 pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ParaP2pExtension];
 
-const PARA_P2P_TRAITS: &[ExtTrait] = &[crate::crdt::MERGEABLE_TRAIT];
+const PARA_P2P_TRAITS: &[ExtTrait] = &[crate::crdt::MERGEABLE_TRAIT, crate::crdt::SYNCABLE_TRAIT];
 
 /// The `para.p2p` modules — CRDT constructors (P0), the `p2p` host capability (P1), and the
 /// `synced` CRDT-backed reactive signal (P2).
@@ -124,6 +125,14 @@ const PARA_P2P_TYPES: &[ExtType] = &[
         dispatch: crate::crdt::PNCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
         docs: PNCOUNTER_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::autodoc::AUTODOC_TYPE_NAME,
+        namespace: "para.crdt",
+        methods: crate::autodoc::AUTODOC_METHODS,
+        dispatch: crate::autodoc::autodoc_dispatch,
+        traits: crate::crdt::CRDT_TRAITS,
         ..ExtType::DEFAULTS
     },
     ExtType {

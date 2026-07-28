@@ -1,0 +1,27 @@
+// para.crdt — `AutoDoc`, the Automerge-backed document CRDT. The three lattices beside it can only
+// ever *gain* information, which is exactly what makes their merge a join — and exactly why none of
+// them can represent removing or overwriting a value. This one can, and the removal converges: a
+// peer that never saw the delete does not resurrect the key.
+// expect: stdout "keys=[\"author\", \"title\"] title=hello"
+// expect: stdout "after_remove=[\"title\"] gone=true"
+// expect: stdout "converged=[\"editor\", \"title\"]"
+// expect: stdout "commutes=true"
+// expect: stdout "wire=[\"editor\", \"title\"]"
+// expect: exit 0
+use para.{crdt}
+
+doc = crdt.automerge().put("title", "hello").put("author", "ada")
+echo "keys=${doc.keys()} title=${doc.get("title") ?? "-"}"
+
+// Deletion — the capability a grow-only set cannot express at all.
+trimmed = doc.remove("author")
+echo "after_remove=${trimmed.keys()} gone=${trimmed.get("author") == none}"
+
+// Concurrent edits to *different* keys both survive the merge.
+peer = crdt.automerge().put("editor", "bob")
+converged = trimmed.merge(peer)
+echo "converged=${converged.keys()}"
+echo "commutes=${trimmed.merge(peer).keys() == peer.merge(trimmed).keys()}"
+
+// The same convergence over the wire encoding `Syncable` publishes.
+echo "wire=${trimmed.merge_bytes(peer.to_bytes()).keys()}"

@@ -1,0 +1,23 @@
+// para.synced — the *other* half of the bound. `synced_signal` requires `T: Mergeable + Syncable`,
+// because a replicated value has to converge **and** know how to cross the wire, and those are
+// separate capabilities: plenty of values merge usefully in-process and never leave it.
+//
+// So a type that merges perfectly but has no encoding is refused — and refused *naming `Syncable`*,
+// rather than with a blanket "not a CRDT" that would send you looking at your merge.
+// expect: error E0025 at 22:5
+// expect: exit 1
+use para.crdt.{Mergeable}
+use para.synced.{synced_signal}
+
+class Local {
+    pub at: int
+    fn new(at: int): Local { return Local { at: at } }
+    impl Mergeable {
+        fn merge(other: Local): Local {
+            return if other.at > self.at then other else self
+        }
+    }
+}
+
+s = synced_signal(Local.new(1), "topic")
+echo s.get()

@@ -41,7 +41,7 @@ pub const GSET_TYPE_IDENTITY: &str = "para.crdt.GSet";
 /// that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound on
 /// `synced_signal`. This is the extern-type analogue of a user type's `impl`, seeded into the
 /// checker's trait table from the registry.
-pub const CRDT_TRAITS: &[&str] = &[MERGEABLE_TRAIT_NAME];
+pub const CRDT_TRAITS: &[&str] = &[MERGEABLE_TRAIT_NAME, SYNCABLE_TRAIT_NAME];
 
 /// `Mergeable`'s short name and qualified identity. The trait lives under `para.crdt` beside the
 /// three CRDTs, so `use para.{crdt}` brings it into scope with them.
@@ -73,10 +73,10 @@ pub const MERGEABLE_TRAIT: ExtTrait = ExtTrait {
 };
 
 /// `merge(other: Self): Self` — required (`ExtTraitMethod::DEFAULTS` is a required, `Self`-receiver
-/// method), and deliberately the *whole* contract. Serialization is not part of it: state crosses
-/// the wire through the sync engine, which knows how to encode a native CRDT and a language value
-/// respectively, so demanding a `to_bytes` here would push an encoding decision onto every
-/// implementor for no gain.
+/// method), and deliberately the *whole* contract. Crossing the wire is a separate capability
+/// ([`SYNCABLE_TRAIT`]): plenty of values converge usefully in-process without ever being
+/// replicated, and folding an encoding decision into the convergence contract would tax every one
+/// of them for a capability they do not use.
 const MERGEABLE_METHODS: &[ExtTraitMethod] = &[ExtTraitMethod {
     sig: ExtFn {
         param_names: &["other"],
@@ -114,6 +114,14 @@ pub const CRDT_FNS: &[ExtFn] = &[
         ret: RetTy::Concrete(GSET_SIG),
         ..ExtFn::DEFAULTS
     },
+    // The document CRDT (see `crate::autodoc`) — the one that can represent deletion and update,
+    // which the three lattices above cannot.
+    ExtFn {
+        name: "automerge",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named(crate::autodoc::AUTODOC_TYPE_NAME)),
+        ..ExtFn::DEFAULTS
+    },
 ];
 
 pub fn crdt_dispatch(
@@ -133,6 +141,10 @@ pub fn crdt_dispatch(
         "gset" => {
             want_arity(func, args, 0)?;
             Ok(extern_out(GSet(noeta_crdt::GSet::new())))
+        }
+        "automerge" => {
+            want_arity(func, args, 0)?;
+            Ok(extern_out(crate::autodoc::AutoDoc::empty()))
         }
         _ => Err(no_function_error("crdt", func)),
     }
@@ -429,6 +441,14 @@ pub fn merge_dyn(
     current: &dyn ExternValue,
     delta: &dyn ExternValue,
 ) -> Option<Box<dyn ExternValue>> {
+    // The document CRDT is one of this package's own, so it rides the native fast path with the
+    // three lattices — `call_method` is for a *user* type, whose merge is written in Noeta.
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<crate::autodoc::AutoDoc>(),
+        delta.as_any().downcast_ref::<crate::autodoc::AutoDoc>(),
+    ) {
+        return Some(Box::new(a.merge(b)));
+    }
     if let (Some(a), Some(b)) = (
         current.as_any().downcast_ref::<GCounter>(),
         delta.as_any().downcast_ref::<GCounter>(),
@@ -452,6 +472,9 @@ pub fn merge_dyn(
 
 /// Serialize a CRDT value to wire bytes for a peer; `None` if it is not a CRDT.
 pub fn to_bytes_dyn(value: &dyn ExternValue) -> Option<Vec<u8>> {
+    if let Some(d) = value.as_any().downcast_ref::<crate::autodoc::AutoDoc>() {
+        return Some(d.to_bytes());
+    }
     if let Some(g) = value.as_any().downcast_ref::<GCounter>() {
         return Some(g.0.to_bytes());
     }
@@ -467,6 +490,10 @@ pub fn to_bytes_dyn(value: &dyn ExternValue) -> Option<Vec<u8>> {
 /// Decode a peer's wire bytes into a CRDT value of the **same concrete type** as `like` (a topic
 /// carries one CRDT type); `None` if `like` is not a CRDT or the bytes are malformed/cross-type.
 pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn ExternValue>> {
+    if like.as_any().is::<crate::autodoc::AutoDoc>() {
+        return crate::autodoc::AutoDoc::from_bytes(bytes)
+            .map(|d| Box::new(d) as Box<dyn ExternValue>);
+    }
     if like.as_any().is::<GCounter>() {
         return noeta_crdt::GCounter::from_bytes(bytes)
             .map(|c| Box::new(GCounter(c)) as Box<dyn ExternValue>);
@@ -573,3 +600,57 @@ fn want_extern<T: Clone + 'static>(
 fn clamp_u64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
+
+/// `Syncable`'s short name and qualified identity — the wire half of a replicated value.
+pub const SYNCABLE_TRAIT_NAME: &str = "Syncable";
+pub const SYNCABLE_TRAIT_IDENTITY: &str = "para.crdt.Syncable";
+
+/// **`Syncable`** — a value that can cross the wire to a peer.
+///
+/// Split from [`MERGEABLE_TRAIT`] deliberately: converging and being replicated are different
+/// capabilities. A value can be perfectly mergeable and never leave the process, and requiring it
+/// to justify an encoding would be a tax on the common case. `synced_signal` therefore bounds on
+/// **both** (`T: Mergeable + Syncable`) — it needs the value to converge *and* to be transmissible,
+/// and asking for exactly the two capabilities it uses is more honest than one fused contract.
+///
+/// The contract is instance-only, which is what makes it implementable from Noeta at all: a trait
+/// method has a `Self` receiver, so there is no place to hang a static `from_bytes`. Decoding is
+/// folded into [`SYNCABLE_METHODS`]'s `merge_bytes` instead — the engine always holds the current
+/// value when peer state arrives, so "decode and merge into me" needs no constructor. It also
+/// degrades well: a malformed or cross-type payload is untrusted input, and an implementor answers
+/// it by returning itself unchanged rather than by failing.
+pub const SYNCABLE_TRAIT: ExtTrait = ExtTrait {
+    name: SYNCABLE_TRAIT_NAME,
+    namespace: "para.crdt",
+    methods: SYNCABLE_METHODS,
+    ..ExtTrait::DEFAULTS
+};
+
+/// `to_bytes(): bytes` — this value's full state for the wire; and
+/// `merge_bytes(other: bytes): Self` — decode a peer's state and merge it into this one.
+///
+/// Both required. Encoding is deliberately not pinned to a format: a native CRDT uses postcard, an
+/// app's type will reach for the language's own serialization, and the engine only ever moves the
+/// bytes between them — it never needs to interpret one type's encoding as another's.
+const SYNCABLE_METHODS: &[ExtTraitMethod] = &[
+    ExtTraitMethod {
+        sig: ExtFn {
+            param_names: &[],
+            name: "to_bytes",
+            params: &[],
+            ret: RetTy::Concrete(SigType::Bytes),
+            ..ExtFn::DEFAULTS
+        },
+        ..ExtTraitMethod::DEFAULTS
+    },
+    ExtTraitMethod {
+        sig: ExtFn {
+            param_names: &["other"],
+            name: "merge_bytes",
+            params: &[SigType::Bytes],
+            ret: RetTy::Concrete(SigType::SelfTy),
+            ..ExtFn::DEFAULTS
+        },
+        ..ExtTraitMethod::DEFAULTS
+    },
+];

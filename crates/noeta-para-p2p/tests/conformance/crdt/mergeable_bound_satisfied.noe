@@ -6,6 +6,11 @@
 // the crdt module when it left `std` for `para`.)
 // expect: stdout "ok"
 // expect: exit 0
+// `Mergeable` is imported because this program *names* it. It was a checker built-in, in scope
+// everywhere without asking; as an ordinary native trait it follows the same rule as every other
+// name — which is the point of the change, not a cost of it. A program that merely *calls*
+// `synced_signal` still imports nothing: the bound there is the extension's own business.
+use para.crdt.{Mergeable}
 use para.{crdt}
 
 fn store<T: Mergeable>(v: T): T { return v; }

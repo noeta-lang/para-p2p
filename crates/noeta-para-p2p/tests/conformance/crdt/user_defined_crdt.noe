@@ -1,0 +1,53 @@
+// para.crdt — a CRDT the *application* defines. `Mergeable` and `Syncable` were once a closed
+// built-in only this package's extern types could satisfy, so an app needing a fourth CRDT had no
+// way to supply one however correct its merge. They are ordinary native traits now: a user class
+// implements them, satisfies the bound, and is accepted by `synced_signal` beside a built-in.
+//
+// The engine calls back into Noeta for this type — `merge`/`to_bytes`/`merge_bytes` are the user's
+// own methods, reached through the trait contract rather than a downcast.
+// expect: stdout "later_wins=second"
+// expect: stdout "earlier_loses=second"
+// expect: stdout "commutes=true"
+// expect: stdout "wire=fromwire"
+// expect: stdout "bound_accepts=true"
+// expect: exit 0
+use para.crdt.{Mergeable, Syncable}
+
+// A last-write-wins register: the highest timestamp wins, ties keep the local value.
+class Lww {
+    pub at: int
+    pub value: string
+
+    fn new(at: int, value: string): Lww { return Lww { at: at, value: value } }
+
+    impl Mergeable {
+        fn merge(other: Lww): Lww {
+            return if other.at > self.at then other else self
+        }
+    }
+
+    impl Syncable {
+        fn to_bytes(): bytes { return "${self.at}|${self.value}".to_bytes() }
+        // Decode-and-merge in one step: a trait method has a `Self` receiver, so there is nowhere
+        // to hang a static `from_bytes` — and the engine always holds the current value when peer
+        // state arrives. Undecodable input answers with `self`, which reads as "nothing changed".
+        fn merge_bytes(other: bytes): Lww {
+            parts = (other.decode() ?? "").split("|", 2)
+            at = if parts.len() > 0 then parts[0].to_int() ?? 0 else 0
+            text = if parts.len() > 1 then parts[1] else ""
+            return self.merge(Lww.new(at, text))
+        }
+    }
+}
+
+early = Lww.new(1, "first")
+late = Lww.new(2, "second")
+
+echo "later_wins=${early.merge(late).value}"
+echo "earlier_loses=${late.merge(early).value}"
+echo "commutes=${early.merge(late).value == late.merge(early).value}"
+echo "wire=${early.merge_bytes(Lww.new(9, "fromwire").to_bytes()).value}"
+
+// A generic bound over the trait accepts it, exactly as it accepts a built-in CRDT.
+fn store<T: Mergeable>(v: T): T { return v }
+echo "bound_accepts=${store(early).value == "first"}"
