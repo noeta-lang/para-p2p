@@ -157,49 +157,42 @@ pub const AUTODOC_METHODS: &[ExtFn] = &[
         name: "put",
         params: &[SigType::String, SigType::String],
         ret: RetTy::Concrete(AUTODOC_SIG),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &["key"],
         name: "get",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Option(&SigType::String)),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &["key"],
         name: "remove",
         params: &[SigType::String],
         ret: RetTy::Concrete(AUTODOC_SIG),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &[],
         name: "keys",
         params: &[],
         ret: RetTy::Concrete(SigType::List(&SigType::String)),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &["other"],
         name: "merge",
         params: &[AUTODOC_SIG],
         ret: RetTy::Concrete(AUTODOC_SIG),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &[],
         name: "to_bytes",
         params: &[],
         ret: RetTy::Concrete(SigType::Bytes),
-        ..ExtFn::DEFAULTS
     },
     ExtFn {
         param_names: &["other"],
         name: "merge_bytes",
         params: &[SigType::Bytes],
         ret: RetTy::Concrete(AUTODOC_SIG),
-        ..ExtFn::DEFAULTS
     },
 ];
 

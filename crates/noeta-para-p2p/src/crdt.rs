@@ -83,7 +83,6 @@ const MERGEABLE_METHODS: &[ExtTraitMethod] = &[ExtTraitMethod {
         name: "merge",
         params: &[SigType::SelfTy],
         ret: RetTy::Concrete(SigType::SelfTy),
-        ..ExtFn::DEFAULTS
     },
     ..ExtTraitMethod::DEFAULTS
 }];
@@ -639,7 +638,6 @@ const SYNCABLE_METHODS: &[ExtTraitMethod] = &[
             name: "to_bytes",
             params: &[],
             ret: RetTy::Concrete(SigType::Bytes),
-            ..ExtFn::DEFAULTS
         },
         ..ExtTraitMethod::DEFAULTS
     },
@@ -649,7 +647,6 @@ const SYNCABLE_METHODS: &[ExtTraitMethod] = &[
             name: "merge_bytes",
             params: &[SigType::Bytes],
             ret: RetTy::Concrete(SigType::SelfTy),
-            ..ExtFn::DEFAULTS
         },
         ..ExtTraitMethod::DEFAULTS
     },
