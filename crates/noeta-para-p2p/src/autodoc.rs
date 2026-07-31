@@ -24,7 +24,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, ChangeHash, ReadDoc, ROOT, ScalarValue};
+use automerge::{AutoCommit, ChangeHash, ROOT, ReadDoc, ScalarValue};
 use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_ext_abi::{
     ExternValue, Host, NativeValue, StdError, arity_error, no_method_error, type_error,

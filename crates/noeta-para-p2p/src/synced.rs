@@ -118,8 +118,8 @@ pub const SYNCED_CTX_FNS: &[ExtFn] = &[ExtFn {
         SigType::Optional(&MEMBERS),
     ],
     ret: RetTy::Concrete(SigType::Generic(SYNCED_SIGNAL_TYPE_NAME, &[VAR_A])),
-                                           ..ExtFn::DEFAULTS
-                                       }];
+    ..ExtFn::DEFAULTS
+}];
 
 pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
     ExtFn {
