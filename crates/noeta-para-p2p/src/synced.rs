@@ -406,7 +406,6 @@ fn handle_of<C: NativeCtx + ?Sized>(ctx: &mut C, recv: Slot) -> CtxResult<Synced
     Ok(handle.expect("a SyncedSignal receiver wraps a SyncedSignalBox"))
 }
 
-/// Clone a slot's value out as a boxed CRDT extern value, or `None` if it is not an extern CRDT.
 // --- The value seam: a native CRDT or a user type implementing the traits ---------------------
 //
 // The engine used to assume its value was one of the three Rust CRDTs and downcast to reach it.
@@ -494,6 +493,7 @@ fn bad_encoding(what: &str) -> CtxError {
     .into()
 }
 
+/// Clone a slot's value out as a boxed CRDT extern value, or `None` if it is not an extern CRDT.
 fn clone_crdt<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> Option<Box<dyn ExternValue>> {
     let mut cloned = None;
     // `with_extern` errs on a non-extern slot; treat that as "not a CRDT" (None).

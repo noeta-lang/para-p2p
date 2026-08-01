@@ -10,7 +10,7 @@ rust-version = "1.95"
 # The convergence core (dep-free CRDTs) and the extension ABI.
 noeta-crdt = { path = "../noeta-crdt" }
 # Pinned to the toolchain release this package version is built against.
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
 # The document CRDT behind `para.crdt.AutoDoc` (see `autodoc.rs`). p2panda ships no application
 # CRDT by design ("compatible with any application data and CRDT"), so the value layer is ours to
 # choose; automerge's save/load/merge match this package's `Syncable`/`Mergeable` contracts
@@ -22,9 +22,9 @@ automerge = "0.10"
 # tiny `noeta-reactive-abi` crate, so this extension depends on **nothing of `noeta-stdlib`**; the
 # engine implements the same trait on the other side. noeta-reactive supplies the `NodeId` handle.
 # Pinned to the toolchain release this package version is built against.
-noeta-reactive = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+noeta-reactive = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
 # Pinned to the toolchain release this package version is built against.
-noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
 # The real p2panda transport (para-namespace F2b). Optional and behind the `ring-p2p` ring: when a
 # host permits real networking (`RealHost`) this crate owns a live p2panda node; off ⇒ the extension
 # uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC.
@@ -44,12 +44,12 @@ ring-p2p = ["dep:noeta-para-p2p-net"]
 # The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
 # (the fixtures resolve `para.*`, which the default std-only registry cannot).
 # Pinned to the toolchain release this package version is built against.
-noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
 # **Test-only** (a dev-dependency — it does not ship): the harness installs the full `std` runtime so
 # the fixtures actually execute. The library itself depends on nothing of `noeta-stdlib` — it reaches
 # the reactive engine purely through the `noeta-reactive-abi` capability contract.
 # Pinned to the toolchain release this package version is built against.
-noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
 
 # Inlined from the monorepo's [workspace.lints] (this crate is standalone now).
 [lints.rust]
