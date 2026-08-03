@@ -14,7 +14,7 @@ rust-version = "1.95"
 
 [dependencies]
 # Pinned to the toolchain release this package version is built against.
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.4.4" }
 # The node owns its OWN multi-thread runtime (persistent gossip/sync tasks outlive individual
 # dispatches — a current-thread `block_on`-per-call runtime cannot), plus mpsc for the drain channels.
 # Feature set = the monorepo workspace pin's features + this crate's additions.
