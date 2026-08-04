@@ -18,6 +18,7 @@
 
 pub mod autodoc;
 pub mod crdt;
+pub mod node;
 pub mod p2p;
 pub mod provider;
 pub mod synced;
@@ -105,8 +106,21 @@ const PARA_P2P_MODULES: &[ExtModule] = &[
     },
 ];
 
-/// The `para.p2p` extern types: the CRDT value types (P0) plus `SyncedSignal<T>` (P2).
+/// The `para.p2p` extern types: the CRDT value types (P0), the named `Node` handle, and
+/// `SyncedSignal<T>` (P2).
 const PARA_P2P_TYPES: &[ExtType] = &[
+    // `Node` — a **named** p2p node (`p2p.open(dir)`), so one program can be several peers. A name,
+    // not an owner: the box carries a config and the live node lives in ctx state keyed on it.
+    ExtType {
+        name: crate::node::NODE_TYPE_NAME,
+        namespace: "para.p2p",
+        ctx_methods: crate::node::NODE_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::node::node_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        docs: crate::node::NODE_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // The CRDT value types (P0): plain-data, immutable, content-equal extern values wrapping the
     // `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
     ExtType {
@@ -180,6 +194,17 @@ const CRDT_DOCS: &[(&str, &str)] = &[
 
 const P2P_DOCS: &[(&str, &str)] = &[
     (
+        "node",
+        "The default peer-to-peer node — the one `publish` / `receive` / `identity` run on — as a \
+         value you can pass around.",
+    ),
+    (
+        "open",
+        "The peer-to-peer node whose identity and durable store live in `dir`, so one program can \
+         act as several peers. The node starts on first use; naming it does not create the \
+         directory.",
+    ),
+    (
         "identity",
         "This peer's public identity string if p2p networking is configured; `none` otherwise.",
     ),
@@ -195,8 +220,8 @@ const P2P_DOCS: &[(&str, &str)] = &[
 
 const SYNCED_DOCS: &[(&str, &str)] = &[(
     "synced_signal",
-    "A `SyncedSignal<T>` over a CRDT value, replicated to peers under `topic` (optionally restricted \
-     to `peers`) — local edits merge conflict-free across the network.",
+    "A `SyncedSignal<T>` over a CRDT value, replicated to peers under `topic` (optionally \
+         restricted to `peers`) — local edits merge conflict-free across the network.",
 )];
 
 const GCOUNTER_DOCS: &[(&str, &str)] = &[

@@ -1,0 +1,44 @@
+// para.p2p — a **named** node (`p2p.open(dir)`) is a value with the same surface as the `p2p`
+// module's free functions, so one program can act as several peers. `p2p.node()` is the default
+// node — the one the free functions run on — as a value.
+//
+// Under the deterministic loopback broker every node shares one message bus whatever directory it
+// names (documented: the sandbox models convergence, not isolation), so what this fixture pins is
+// that the surface exists, type-checks, and behaves identically to the free functions on both
+// backends. Real per-node separation needs the transport ring and is covered by the Rust tests.
+// expect: stdout "alice recv 61"
+// expect: stdout "default recv 62"
+// expect: stdout "identity none"
+// expect: stdout "done 0"
+// expect: exit 0
+use para.{p2p}
+
+async fn run(): int {
+    alice = p2p.open("noeta-p2p-fixture/alice")
+    alice.publish("room", "a")
+    msg = alice.receive("room").await
+    hex = match msg {
+        some(b) => b.to_hex(),
+        none => "none",
+    }
+    echo "alice recv " ~ hex
+
+    // `p2p.node()` names the same node the free functions use, so a message published through the
+    // module is received through the handle.
+    p2p.publish("other", "b")
+    got = p2p.node().receive("other").await
+    hex2 = match got {
+        some(b) => b.to_hex(),
+        none => "none",
+    }
+    echo "default recv " ~ hex2
+
+    id = match alice.identity() {
+        some(k) => k,
+        none => "none",
+    }
+    echo "identity " ~ id
+    return 0
+}
+
+echo "done " ~ run().await

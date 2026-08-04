@@ -34,7 +34,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use noeta_ext_abi::host::P2p;
 use noeta_ext_abi::{NativeCtx, P2pBackend, P2pReceiveIo, StdError};
@@ -64,10 +64,17 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     /// The node living in an exact directory — the multi-identity case (one directory per user).
+    ///
+    /// The directory is **canonicalized** first ([`canonical_dir`]), because this value is the map
+    /// key: `/srv/a`, `/srv/a/`, `srv/a` from the right working directory and a symlink pointing at
+    /// any of them are one node, and keying them separately would start several nodes against one
+    /// `identity.key` and one `store.db`. That is a demonstrated corruption mode, not a theoretical
+    /// one — two nodes sharing a store collide on the store's own migration
+    /// (`index ux_orderer_pending_v1 already exists`).
     pub fn at(dir: impl Into<PathBuf>) -> NodeConfig {
         NodeConfig {
             app_id: None,
-            data_dir: Some(dir.into()),
+            data_dir: Some(canonical_dir(&dir.into())),
         }
     }
 
@@ -75,6 +82,45 @@ impl NodeConfig {
     pub fn with_app(mut self, app_id: Option<String>) -> NodeConfig {
         self.app_id = app_id;
         self
+    }
+}
+
+/// One spelling for one directory, so one directory is one node.
+///
+/// `fs::canonicalize` is the only thing that resolves symlinks, but it **fails on a path that does
+/// not exist yet** — and naming a node whose directory has not been created is the normal case (a
+/// first run creates it). So: make the path absolute, then canonicalize the longest **existing**
+/// ancestor and re-append the segments below it. The existing part gets full symlink/`..`
+/// resolution; the not-yet-created tail is carried literally, which is exactly right because there
+/// is nothing there to resolve yet — and once it *is* created, every later spelling canonicalizes
+/// through the same resolved ancestor and lands on the same key.
+///
+/// Chosen over **create-then-canonicalize** deliberately: naming a node should not have the side
+/// effect of creating a directory, and it must not be able to *fail* — a name is not an operation.
+/// The transport creates the directory when the node actually starts, which is where a permission
+/// error belongs. (`.` segments and a trailing slash need no handling: [`Path`] compares and hashes
+/// by component, so `/a/./b/` and `/a/b` are already the same key.)
+fn canonical_dir(dir: &Path) -> PathBuf {
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = absolute.clone();
+    loop {
+        if let Ok(resolved) = probe.canonicalize() {
+            let mut out = resolved;
+            out.extend(tail.iter().rev());
+            return out;
+        }
+        // Nothing at `probe` exists yet — step up and keep the segment for re-appending.
+        let name = probe.file_name().map(|n| n.to_os_string());
+        match (probe.parent().map(Path::to_path_buf), name) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                probe = parent;
+            }
+            // No ancestor resolved at all (the root itself is unreadable): the absolute path is the
+            // best key available, and it is still stable for a given spelling.
+            _ => return absolute,
+        }
     }
 }
 
@@ -112,6 +158,21 @@ where
     f(&mut *guard)
 }
 
+/// Run `f` against the [`P2pBackend`] of the node `config` names — the node-scoped twin of
+/// [`with_p2p`], which is this with the host's own config. `None` is the loopback broker.
+pub fn with_node<C, R>(
+    ctx: &mut C,
+    config: Option<NodeConfig>,
+    f: impl FnOnce(&mut dyn P2p) -> Result<R, StdError>,
+) -> Result<R, StdError>
+where
+    C: NativeCtx + ?Sized,
+{
+    let backend = backend_for(ctx, config)?;
+    let mut guard = backend.lock().expect("p2p backend mutex poisoned");
+    f(&mut *guard)
+}
+
 /// This run's default [`P2pBackend`] — the node the host's `real_p2p()` config names, created on
 /// first access and cached in ctx state. An `Arc` clone the caller may keep past the ctx borrow (the
 /// receive descriptor captures one; see [`receive_descriptor`]).
@@ -127,30 +188,49 @@ pub fn backend_for<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     requested: Option<NodeConfig>,
 ) -> Result<P2pBackend, StdError> {
-    let key = backend_key(requested);
-    // Fast path: this node already exists for this run.
-    {
-        let state = ctx.state(STATE_KEY, new_state);
-        let cell = state.borrow();
-        if let Some(backend) = nodes(&**cell).get(&key) {
-            return Ok(backend.clone());
-        }
-    }
-    // First use of this node: build it, then cache it under its key.
-    let backend = create_backend(key.clone())?;
+    // Whether this host permits real networking at all. It must be asked HERE rather than inferred
+    // from `requested`: a program can name a node with `p2p.open` on any host, including the
+    // deterministic sandbox, and a named node must not be what turns a live QUIC transport on.
+    let real_permitted = ctx.host().real_p2p().is_some();
+    // The registry rule itself lives in `backend_in`, spelled once; this is only where the map is
+    // kept. Building a node touches no ctx state, so holding the borrow across it is safe.
     let state = ctx.state(STATE_KEY, new_state);
     let mut cell = state.borrow_mut();
-    nodes_mut(&mut **cell).insert(key, backend.clone());
+    backend_in(nodes_mut(&mut **cell), requested, real_permitted)
+}
+
+/// The **node registry** itself, over a plain map — [`backend_for`] minus the ctx-state plumbing.
+/// One directory reaches one live node because one key reaches one map entry; this is where that
+/// happens, and it is separated out so the property is testable without a whole `NativeCtx`.
+pub fn backend_in(
+    nodes: &mut HashMap<Option<NodeConfig>, P2pBackend>,
+    requested: Option<NodeConfig>,
+    real_permitted: bool,
+) -> Result<P2pBackend, StdError> {
+    let key = backend_key(requested, real_permitted);
+    if let Some(backend) = nodes.get(&key) {
+        return Ok(backend.clone());
+    }
+    let backend = create_backend(key.clone())?;
+    nodes.insert(key, backend.clone());
     Ok(backend)
 }
 
 /// The ctx-state key a request resolves to. A real node keys on its own config (identity + dir);
-/// every loopback request collapses onto one shared broker — `None` (no real networking) and, when
-/// this build carries no transport ring, any request at all, since the backend it would get is the
-/// deterministic broker either way.
-fn backend_key(requested: Option<NodeConfig>) -> Option<NodeConfig> {
+/// every loopback request collapses onto one shared broker.
+///
+/// Two conditions must BOTH hold for a request to name a node of its own: the host permits real
+/// networking (`real_permitted`), and this build carries the transport ring. Otherwise the backend
+/// would be the deterministic broker either way, and keying it per config would fragment the one
+/// shared log — so the key collapses to `None`.
+///
+/// The host condition is load-bearing and easy to lose: naming a node (`p2p.open`) is something a
+/// program may do on *any* host, so if the key ignored the host policy, a sandboxed or oracle run
+/// that opened a node would start a live p2panda node over QUIC. The conformance corpus under
+/// `--features ring-p2p` is what catches that, and did.
+fn backend_key(requested: Option<NodeConfig>, real_permitted: bool) -> Option<NodeConfig> {
     match requested {
-        Some(config) if cfg!(feature = "ring-p2p") => Some(config),
+        Some(config) if real_permitted && cfg!(feature = "ring-p2p") => Some(config),
         _ => None,
     }
 }
@@ -192,12 +272,6 @@ fn new_state() -> Box<dyn Any> {
     Box::new(HashMap::<Option<NodeConfig>, P2pBackend>::new())
 }
 
-fn nodes(state: &dyn Any) -> &HashMap<Option<NodeConfig>, P2pBackend> {
-    state
-        .downcast_ref()
-        .expect("para.p2p state is a node map keyed on NodeConfig")
-}
-
 fn nodes_mut(state: &mut dyn Any) -> &mut HashMap<Option<NodeConfig>, P2pBackend> {
     state
         .downcast_mut()
@@ -217,33 +291,107 @@ pub fn receive_descriptor<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     topic: String,
 ) -> Result<Box<dyn noeta_ext_abi::ExternIo>, StdError> {
-    let backend = p2p_backend(ctx)?;
+    let config = host_node_config(ctx);
+    receive_descriptor_for(ctx, config, topic)
+}
+
+/// [`receive_descriptor`] against the node `config` names, for `Node.receive`.
+pub fn receive_descriptor_for<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    config: Option<NodeConfig>,
+    topic: String,
+) -> Result<Box<dyn noeta_ext_abi::ExternIo>, StdError> {
+    let backend = backend_for(ctx, config)?;
     Ok(Box::new(P2pReceiveIo { backend, topic }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
+
+    /// A throwaway directory tree under the OS temp dir, removed on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            let dir = std::env::temp_dir().join(format!(
+                "noeta-p2p-provider-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            TempDir(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// Naming a directory names a node: two dirs are two keys, the same dir is one key — the
     /// property the ctx-state map turns into "two live nodes" / "one shared node".
     #[test]
     fn a_node_is_identified_by_its_data_dir() {
-        let alice = NodeConfig::at("/var/lib/app/alice");
-        let bob = NodeConfig::at("/var/lib/app/bob");
+        let root = TempDir::new("identity");
+        let alice = NodeConfig::at(root.0.join("alice"));
+        let bob = NodeConfig::at(root.0.join("bob"));
         assert_ne!(alice, bob);
-        assert_eq!(alice, NodeConfig::at("/var/lib/app/alice"));
+        assert_eq!(alice, NodeConfig::at(root.0.join("alice")));
         // The app namespace only picks the *default* location, so it is part of the identity too.
         assert_ne!(
             NodeConfig::default().with_app(Some("acme/chat".into())),
             NodeConfig::default().with_app(Some("acme/wiki".into()))
         );
+    }
+
+    /// **One directory is one node, however it is spelled.** Keying the live-node map on the raw
+    /// path would let a trailing slash, a `.` segment, a relative path or a symlink start several
+    /// nodes against one `identity.key` and one `store.db` — a store-level collision, not a
+    /// cosmetic one. Every spelling below must produce the identical key.
+    #[test]
+    fn every_spelling_of_one_directory_is_one_node() {
+        let root = TempDir::new("spelling");
+        let real = root.0.join("alice");
+        std::fs::create_dir_all(&real).expect("node dir");
+        let canonical = NodeConfig::at(&real);
+
+        // A trailing separator, and a `.` segment in the middle.
+        assert_eq!(canonical, NodeConfig::at(format!("{}/", real.display())));
+        assert_eq!(canonical, NodeConfig::at(root.0.join(".").join("alice")));
+        // A `..` that walks back through a real directory.
         assert_eq!(
-            NodeConfig::at("/d").data_dir.as_deref(),
-            Some(Path::new("/d"))
+            canonical,
+            NodeConfig::at(root.0.join("alice").join("..").join("alice"))
         );
+        // A symlink pointing at the same directory — the case only `canonicalize` catches.
+        #[cfg(unix)]
+        {
+            let link = root.0.join("alice-link");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            assert_eq!(canonical, NodeConfig::at(&link));
+        }
+        // A relative path resolved against the current working directory.
+        let cwd = std::env::current_dir().expect("cwd");
+        if let Ok(relative) = real.strip_prefix(&cwd) {
+            assert_eq!(canonical, NodeConfig::at(relative));
+        }
+
+        // A directory that does not exist yet still gets a stable, absolute key — naming a node
+        // must not require creating it, and must not fail.
+        let unborn = root.0.join("bob").join("deep").join("not-yet");
+        assert_eq!(NodeConfig::at(&unborn), NodeConfig::at(&unborn));
+        assert!(
+            NodeConfig::at(&unborn)
+                .data_dir
+                .expect("a named node has a dir")
+                .is_absolute()
+        );
+        assert!(!unborn.exists(), "naming a node must not create it");
+        // …and once it *is* created, a fresh spelling still lands on that same key.
+        let before = NodeConfig::at(&unborn);
+        std::fs::create_dir_all(&unborn).expect("create the named dir");
+        assert_eq!(before, NodeConfig::at(&unborn));
     }
 
     /// The loopback broker is shared, never keyed: with no real networking (or no transport ring)
@@ -251,12 +399,71 @@ mod tests {
     /// converge and the oracle sees exactly the behavior it saw before nodes were nameable.
     #[test]
     fn loopback_requests_collapse_onto_one_broker() {
-        assert_eq!(backend_key(None), None);
-        let named = backend_key(Some(NodeConfig::at("/var/lib/app/alice")));
+        let root = TempDir::new("collapse");
+        let alice = NodeConfig::at(root.0.join("alice"));
+        assert_eq!(backend_key(None, true), None);
+        // A named node on a host that permits no real networking is still the broker — naming a
+        // node must never be what enables a live transport.
+        assert_eq!(backend_key(Some(alice.clone()), false), None);
+        let named = backend_key(Some(alice.clone()), true);
         if cfg!(feature = "ring-p2p") {
-            assert_eq!(named, Some(NodeConfig::at("/var/lib/app/alice")));
+            assert_eq!(named, Some(alice));
         } else {
             assert_eq!(named, None, "no ring ⇒ the broker, whatever was asked for");
+        }
+    }
+
+    /// **Opening one directory twice reaches one live node.** The registry is what guarantees it:
+    /// two requests naming the same directory (in any spelling) resolve to one key and therefore
+    /// one entry — asserted on pointer identity, since two `P2pBackend`s that merely compare equal
+    /// would still be two nodes on one store.
+    #[test]
+    fn opening_one_directory_twice_reaches_one_node() {
+        let root = TempDir::new("reuse");
+        let alice = root.0.join("alice");
+        std::fs::create_dir_all(&alice).expect("node dir");
+        let mut nodes = HashMap::new();
+
+        let first = backend_in(&mut nodes, Some(NodeConfig::at(&alice)), true).expect("first open");
+        // A different spelling of the same directory — the collision this must not create.
+        let again = backend_in(
+            &mut nodes,
+            Some(NodeConfig::at(format!("{}/", alice.display()))),
+            true,
+        )
+        .expect("second open");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "one directory must reach one live node"
+        );
+        assert_eq!(nodes.len(), 1, "and must occupy one registry entry");
+    }
+
+    /// Two distinct directories in one process are two nodes — the multi-identity property, at the
+    /// registry level. Under the ring they are two live p2panda nodes; without it both collapse
+    /// onto the one deterministic broker, which is the documented sandbox behavior.
+    #[test]
+    fn two_directories_in_one_process_are_two_nodes() {
+        let root = TempDir::new("two");
+        let (alice, bob) = (root.0.join("alice"), root.0.join("bob"));
+        std::fs::create_dir_all(&alice).expect("alice dir");
+        std::fs::create_dir_all(&bob).expect("bob dir");
+        let mut nodes = HashMap::new();
+
+        let a = backend_in(&mut nodes, Some(NodeConfig::at(&alice)), true).expect("alice");
+        let b = backend_in(&mut nodes, Some(NodeConfig::at(&bob)), true).expect("bob");
+        if cfg!(feature = "ring-p2p") {
+            assert!(
+                !std::sync::Arc::ptr_eq(&a, &b),
+                "two directories are two nodes"
+            );
+            assert_eq!(nodes.len(), 2);
+        } else {
+            assert!(
+                std::sync::Arc::ptr_eq(&a, &b),
+                "no ring ⇒ one shared broker, whatever was named"
+            );
+            assert_eq!(nodes.len(), 1);
         }
     }
 
@@ -274,11 +481,12 @@ mod tests {
     #[cfg(feature = "ring-p2p")]
     #[test]
     fn a_named_data_dir_reaches_the_transport() {
-        let named = transport_config(&NodeConfig::at("/var/lib/app/alice"));
-        assert_eq!(
-            named.data_dir.as_deref(),
-            Some(Path::new("/var/lib/app/alice"))
-        );
+        let root = TempDir::new("transport");
+        let dir = root.0.join("alice");
+        std::fs::create_dir_all(&dir).expect("node dir");
+        let named = transport_config(&NodeConfig::at(&dir));
+        // Compared against std's own `canonicalize` — an oracle independent of `canonical_dir`.
+        assert_eq!(named.data_dir, Some(dir.canonicalize().expect("canonical")));
         assert!(named.persist);
 
         let default = transport_config(&NodeConfig::default().with_app(Some("acme/chat".into())));

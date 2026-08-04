@@ -9,7 +9,7 @@ This package is **fully native**: its whole surface is a Rust extension (there i
 Three modules, all rooted at `para`:
 
 - **`para.crdt`** — state-based CRDT value types: `crdt.gcounter()`, `crdt.pncounter()`, `crdt.gset()`, and the Automerge-backed document `crdt.automerge()`. Merge is commutative, associative, and idempotent, so independent replicas converge to the same value regardless of the order or duplication of the updates they exchange. The set is **open**: `Mergeable` and `Syncable` are ordinary traits your own type can implement.
-- **`para.p2p`** — `publish` / `receive` / `identity` over the `P2p` host capability. With the real transport (the `ring-p2p` feature of the extension crate) that is a live p2panda node — gossip + log-sync over iroh/QUIC; without it, a deterministic in-process loopback broker, so plain builds and tests never link the networking tree.
+- **`para.p2p`** — `publish` / `receive` / `identity` over the `P2p` host capability, on the default node or on one you `p2p.open(dir)` yourself (several peer identities in one program). With the real transport (the `ring-p2p` feature of the extension crate) that is a live p2panda node — gossip + log-sync over iroh/QUIC; without it, a deterministic in-process loopback broker, so plain builds and tests never link the networking tree.
 - **`para.synced`** — `synced_signal(crdt, topic)`: a CRDT-backed signal that is a node in the **same** reactive graph as core `std.reactive` — a merge (local or from a peer) reruns dependent `computed`/`effect`s. Over the real transport it adds end-to-end group encryption and dynamic membership.
 
 The Rust crates behind that surface:
@@ -22,7 +22,7 @@ The Rust crates behind that surface:
 
 ```toml
 [dependencies]
-para = { version = "^0.1", package = "para/p2p" }
+para = { version = "^0.3", package = "para/p2p" }
 
 [trust]
 native = ["para/p2p"]   # authorizes the package's native extension
@@ -140,6 +140,8 @@ x = synced_signal(Lww.new(1, "hello"), "topic")   // accepted like any built-in
 | `p2p.publish` | `(topic: string, message: string \| bytes)` | Broadcast to everyone subscribed to the topic. |
 | `p2p.receive` | `(topic: string) -> Future<?bytes>` | The next message — `.await` it; `none` once the topic has drained. |
 | `p2p.identity` | `() -> ?string` | This node's stable identity (the hex Ed25519 public key it signs with); `none` under the loopback broker, which has no network identity. |
+| `p2p.open` | `(dir: string) -> Node` | The node whose identity and durable store live in `dir` — how one program acts as several peers. |
+| `p2p.node` | `() -> Node` | The default node, the one the three functions above run on, as a value you can pass around. |
 
 Topics are independent channels: every subscriber sees every message, and receiving from an empty topic yields `none` immediately, so a drain loop terminates:
 
@@ -162,9 +164,35 @@ async fn drain(): void {
 }
 ```
 
+### Several identities in one program
+
+The three functions above run on the program's **default** node. That is the right shape for an app that is one peer, but a multi-user desktop app or a multi-tenant server is several peers at once, and a node's identity is exactly the directory its `identity.key` and `store.db` live in. `p2p.open(dir)` names such a node; every function above is also a method on it.
+
+```noeta
+use para.{crdt}
+use para.{p2p}
+
+alice = p2p.open("/srv/app/users/alice")
+bob = p2p.open("/srv/app/users/bob")
+
+alice.publish("room", "hello from alice")
+echo alice.identity()                       // alice's own Ed25519 key, not bob's
+counter = bob.synced_signal(crdt.gcounter(), "tally")
+```
+
+A `Node` is **a name, not a resource**: it holds no socket, so nothing has to be closed, and `p2p.open` neither creates the directory nor starts the node — the node starts on first use, like the default one always has. Opening one directory twice reaches one live node however you spell the path (`/srv/a`, `/srv/a/`, a relative path, a symlink all resolve to the same node), because two nodes sharing one store would corrupt it.
+
+`p2p.node()` is the default node as a value, so a function can take a `Node` and work for either.
+
+> [!NOTE]
+> `p2p.open` is not a permission boundary and does not try to be one. If your program can write to a directory, it can open a node there; restricting that is a sandbox's job (a container, a flatpak), not this library's.
+
+> [!NOTE]
+> `node.synced_signal(…)` accepts exactly the same values as `para.synced.synced_signal(…)` — both built-in and user-defined CRDTs, and both reject a non-CRDT at compile time — but the method form reports the rejection as a plain type error (`E0007`) rather than the named bound violation (`E0025`). The bound is declared identically; the checker only resolves a signature variable from a *generic receiver's* type arguments, and `Node` is not generic.
+
 ## Synced signals — reactive state shared across peers
 
-A `synced_signal(initial, topic)` fuses the layers: a reactive signal whose value is a CRDT and whose changes replicate over a p2p topic. Its value type must be `Mergeable + Syncable` — it has to converge *and* know how to cross the wire — enforced at compile time, so you can never sync a value with no convergence story (`synced_signal(42, "t")` is a type error), nor one that converges but cannot be transmitted. Because a synced signal is a node in the *same* reactive graph as `signal`/`computed`/`effect`, a peer's merge propagates to dependents exactly like a local update.
+A `synced_signal(initial, topic)` — on the default node, or `node.synced_signal(initial, topic)` on one you opened — fuses the layers: a reactive signal whose value is a CRDT and whose changes replicate over a p2p topic. Its value type must be `Mergeable + Syncable` — it has to converge *and* know how to cross the wire — enforced at compile time, so you can never sync a value with no convergence story (`synced_signal(42, "t")` is a type error), nor one that converges but cannot be transmitted. Because a synced signal is a node in the *same* reactive graph as `signal`/`computed`/`effect`, a peer's merge propagates to dependents exactly like a local update.
 
 The surface is a signal you converge rather than overwrite:
 

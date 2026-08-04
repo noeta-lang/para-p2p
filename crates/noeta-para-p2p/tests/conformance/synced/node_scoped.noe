@@ -1,0 +1,25 @@
+// para.synced — a synced signal replicating through a **named** node. `alice.synced_signal(…)` is
+// `synced_signal(…)` on a node the program opened, so a multi-identity program replicates each
+// identity through its own node. The value semantics are unchanged: the same CRDT, the same
+// reactive-graph integration, the same explicit `.sync()`.
+//
+// Under the deterministic broker both replicas share one bus, so they converge exactly as two
+// module-level `synced_signal`s do — the sandbox models convergence, not isolation.
+// expect: stdout "alice=1"
+// expect: stdout "converged a=3 b=3"
+// expect: exit 0
+use para.{crdt}
+use para.{p2p}
+use para.synced.{synced_signal}
+
+alice = p2p.open("noeta-p2p-fixture/alice")
+
+a = alice.synced_signal(crdt.gcounter().increment("A", 1), "shared")
+echo "alice=${a.get().value()}"
+
+// A signal on the default node, on the same topic — under the broker the two converge.
+b = synced_signal(crdt.gcounter().increment("B", 2), "shared")
+a.sync()
+b.sync()
+
+echo "converged a=${a.get().value()} b=${b.get().value()}"
