@@ -612,12 +612,14 @@ pub const SYNCABLE_TRAIT_IDENTITY: &str = "para.crdt.Syncable";
 /// **both** (`T: Mergeable + Syncable`) — it needs the value to converge *and* to be transmissible,
 /// and asking for exactly the two capabilities it uses is more honest than one fused contract.
 ///
-/// The contract is instance-only, which is what makes it implementable from Noeta at all: a trait
-/// method has a `Self` receiver, so there is no place to hang a static `from_bytes`. Decoding is
-/// folded into [`SYNCABLE_METHODS`]'s `merge_bytes` instead — the engine always holds the current
-/// value when peer state arrives, so "decode and merge into me" needs no constructor. It also
-/// degrades well: a malformed or cross-type payload is untrusted input, and an implementor answers
-/// it by returning itself unchanged rather than by failing.
+/// The contract is instance-only by design, not by necessity: decoding folds into
+/// [`SYNCABLE_METHODS`]'s `merge_bytes` rather than sitting behind a separate `from_bytes`
+/// constructor. The engine always holds the current value when peer state arrives, so
+/// "decode a peer's state and merge it into me" is the whole operation — a constructor would only
+/// mint a value for the caller to immediately merge away. And it degrades well: a malformed or
+/// cross-type payload is untrusted input, and an implementor answers it by returning itself
+/// unchanged, which the caller's equality check then reads as "nothing changed". A decoder that
+/// had to *produce* a value has no such answer available; it can only fail.
 pub const SYNCABLE_TRAIT: ExtTrait = ExtTrait {
     name: SYNCABLE_TRAIT_NAME,
     namespace: "para.crdt",
