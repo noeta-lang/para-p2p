@@ -63,10 +63,19 @@ jobs:
             (cd "${crate}" && cargo test)
           done
       # The real-transport ring (p2panda over iroh/QUIC) is off by default so plain builds link no
-      # networking tree — keep it compiling anyway.
-      - name: cargo check --features ring-p2p (real-transport ring)
+      # networking tree. This RUNS the ring's tests rather than only compiling them: behavior that
+      # exists solely on the ring (a named node reaching the transport with its own data dir) would
+      # otherwise have no automated coverage at all, since `cargo check` never builds a test target.
+      #
+      # Running the whole suite here — the `.noe` conformance fixtures included — is safe and
+      # deliberate: the fixtures execute on `SandboxHost`, whose `P2pProvider::real_p2p()` is the
+      # default `None`, so the extension serves them the loopback broker even with the ring linked.
+      # No p2panda node starts, nothing binds a socket, and the differential oracle stays
+      # deterministic. That the corpus passes identically with and without the ring is itself the
+      # property worth gating: linking the transport must not perturb a program's behavior.
+      - name: cargo test --features ring-p2p (real-transport ring)
         working-directory: crates/noeta-para-p2p
-        run: cargo check --features ring-p2p
+        run: cargo test --features ring-p2p
 
   examples:
     name: Examples (noeta check + test)
