@@ -81,12 +81,15 @@ impl NodeConfig {
 /// The [`NodeConfig`] the *host* asks for — the default node of this run, and the one every
 /// `p2p.publish` / `p2p.receive` / `synced_signal` uses today.
 ///
-/// TODO(noeta-ext-abi): `RealP2pConfig` carries only `app_id`, so a host cannot yet name a data dir
-/// and this maps to `data_dir: None`. The toolchain-side change that completes the seam is a
-/// `pub data_dir: Option<PathBuf>` field on `noeta_ext_abi::host::RealP2pConfig`, filled by
-/// `RealHost::with_p2p_dir`; when it lands, the `None` below becomes `config.data_dir` and a host
-/// (a multi-tenant server assigning one dir per signed-in user) steers the default node without any
-/// other change here.
+/// A host can currently name only the *app namespace*, never a directory: `RealP2pConfig` carries
+/// `app_id` alone, so this maps to `data_dir: None` and the default node lands in the per-app
+/// default location. The toolchain-side change that opens the seam is a
+/// `pub data_dir: Option<PathBuf>` field on `noeta_ext_abi::host::RealP2pConfig`, filled by a
+/// `RealHost::with_p2p_dir` builder; with it, the `None` below becomes `config.data_dir` and a host
+/// — a multi-tenant server assigning one directory per signed-in user — steers the default node
+/// with no other change on this side. Note the precedence that would follow: a directory named
+/// here is a named node, so it wins over `$NOETA_P2P_DIR` rather than yielding to it, which is what
+/// keeps one process-wide env var from collapsing every tenant onto a single identity and store.
 pub fn host_node_config<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<NodeConfig> {
     ctx.host().real_p2p().map(|config| NodeConfig {
         app_id: config.app_id,

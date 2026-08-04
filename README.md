@@ -240,10 +240,14 @@ The backend is chosen per run by the host's real-networking policy, and both imp
 - **Loopback broker** — a deterministic in-process, per-topic FIFO log. Used on hosts that permit no real networking (the sandbox, tests) and in builds without the `ring-p2p` feature. Publish-then-receive drains in publish order and terminates, so p2p programs are testable and reproducible; two synced signals on one topic model two peers deterministically.
 - **Real p2panda node** (`ring-p2p`) — a live p2panda-net node: mDNS peer discovery, NAT-traversing QUIC via iroh, gossip pub/sub, and eventual-consistency **log-sync** backing `synced_signal` — every state a replica publishes appends to a durable, signed operation log, so a late-joining peer syncs the full history and converges from it.
 
-The real node is **persistent by default**: its Ed25519 identity (`identity.key`, the value `p2p.identity()` returns) and durable operation store (`store.db`) live in a per-app data directory, so a `noeta run` of a p2p program keeps its identity and synced logs across restarts with zero configuration. The directory resolves as `$XDG_DATA_HOME/<app>/p2p`, where `<app>` is `$NOETA_P2P_APP` if set, else the project's package name (or a distributed binary's own file stem); `$NOETA_P2P_DIR` (an absolute path) overrides everything. Two Noeta apps on one machine never share an identity or store.
+The real node is **persistent by default**: its Ed25519 identity (`identity.key`, the value `p2p.identity()` returns) and durable operation store (`store.db`) live in a per-app data directory, so a `noeta run` of a p2p program keeps its identity and synced logs across restarts with zero configuration. Two Noeta apps on one machine never share an identity or store.
+
+A node **is** its directory — identity, durable log and encryption credentials all live there — so naming a directory names a node, and the precedence follows from that. A node opened at an explicit directory uses that directory, full stop: no environment variable overrides it, because overriding it would silently collapse several named nodes onto one identity and store. A node nobody named — the default node a plain `p2p.publish` runs on — resolves its directory as `$NOETA_P2P_DIR` if set (an absolute path), else `$XDG_DATA_HOME/<app>/p2p`, where `<app>` is `$NOETA_P2P_APP` if set, else the project's package name (supplied by the toolchain), else the running binary's own file stem.
 
 > [!NOTE]
 > `p2p.identity()` returns `none` and `.status()` is always `"synced"` under the loopback broker — deliberate, so a program that reads them behaves identically on both backends.
+>
+> The broker likewise does **not** model node isolation: every node in a run shares one message bus, whatever directory it names. Convergence is therefore testable in the oracle — two nodes exchange state exactly as two real peers would — but isolation is not: a program cannot verify under loopback that one node fails to see another's topic, because there it always sees it. That is a deliberate trade of fidelity for determinism and oracle-safety, and it is true only of the broker; real nodes are genuinely separate, each with its own identity, store and encryption credentials.
 
 ## Examples
 
@@ -259,7 +263,7 @@ Consumers compile this package's native crates locally: `cargo` and a Rust toolc
 ## Development
 
 - `cargo test` in each `crates/*` member (standalone; `noeta-para-p2p`'s harness runs the `.noe` conformance fixtures).
-- `cargo check --features ring-p2p` in `crates/noeta-para-p2p` compiles the real-transport ring.
+- `cargo test --features ring-p2p` in `crates/noeta-para-p2p` builds and exercises the real-transport ring (the ring-gated unit tests, plus the conformance fixtures — which stay on the loopback broker even with the ring linked, since the sandbox host permits no real networking).
 - `noeta run` / `noeta test` the program under `examples/`.
 
 See [AGENTS.md](AGENTS.md) for the repo layout and the toolchain environment the examples need.
