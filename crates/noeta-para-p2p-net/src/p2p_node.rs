@@ -1174,6 +1174,46 @@ mod tests {
         assert_ne!(ephemeral.identity(), id1);
     }
 
+    /// **Many identities in one process**: two persistent nodes pointed at two data dirs run
+    /// *simultaneously* — each with its own identity, store and encryption credentials — which is
+    /// what makes a multi-user / multi-tenant program expressible. (The neighboring restart test
+    /// drops each node before starting the next; this one deliberately keeps both alive.) Hermetic:
+    /// starting a node binds local sockets only, no multicast needed.
+    #[test]
+    fn two_nodes_in_one_process_keep_separate_identities() {
+        let alice = TempDir::new("tenant-alice");
+        let bob = TempDir::new("tenant-bob");
+
+        let a = P2pNode::start_with_config(P2pConfig::at(&alice.0)).expect("alice's node");
+        let b = P2pNode::start_with_config(P2pConfig::at(&bob.0)).expect("bob's node");
+        let (a_id, b_id) = (a.identity(), b.identity());
+        assert_ne!(
+            a_id, b_id,
+            "one dir, one identity — two dirs, two identities"
+        );
+        assert_ne!(
+            a.crypto_group_id().expect("alice's group id"),
+            b.crypto_group_id().expect("bob's group id"),
+            "the encryption identity is per-node too"
+        );
+        // Each node's state landed in its own directory, not a shared one.
+        assert!(alice.0.join("identity.key").exists());
+        assert!(bob.0.join("identity.key").exists());
+
+        // Both are live at once: each serves its own subscriptions independently.
+        let sub_a = a.subscribe("room").expect("alice subscribes");
+        let sub_b = b.subscribe("room").expect("bob subscribes");
+        assert_eq!(a.poll_sub(sub_a), None);
+        assert_eq!(b.poll_sub(sub_b), None);
+
+        // And each comes back as itself: dropping one and restarting it against its own dir
+        // restores that identity while the other keeps running untouched.
+        drop(a);
+        let a_again = P2pNode::start_with_config(P2pConfig::at(&alice.0)).expect("alice restarts");
+        assert_eq!(a_again.identity(), a_id);
+        assert_eq!(b.identity(), b_id);
+    }
+
     /// P3.4: the default data dir is namespaced per application, so two different Noeta apps never
     /// share one identity/store dir. Skipped if an env override is in effect on the test host.
     #[test]
