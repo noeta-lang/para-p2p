@@ -76,8 +76,19 @@ impl NodeConfig {
     /// key: `/srv/a`, `/srv/a/`, `srv/a` from the right working directory and a symlink pointing at
     /// any of them are one node, and keying them separately would start several nodes against one
     /// `identity.key` and one `store.db`. That is a demonstrated corruption mode, not a theoretical
-    /// one — two nodes sharing a store collide on the store's own migration
-    /// (`index ux_orderer_pending_v1 already exists`).
+    /// one, and it has two faces — both measured against this transport:
+    ///
+    /// - **Overlapping starts fail loudly**: two nodes building their stores at once collide on the
+    ///   store's own migration (`p2p store: while executing migration 20250928132846: … index
+    ///   ux_orderer_pending_v1 already exists`), and one of them does not start at all.
+    /// - **Staggered starts fail silently**, which is worse. Both nodes come up, both load the same
+    ///   `identity.key`, so they are two independent nodes *presenting the same peer id*, appending
+    ///   to one `store.db` and one `spaces.db` through two connections that know nothing of each
+    ///   other. Nothing reports anything.
+    ///
+    /// A registry serializes its own creations, so the split-key defect this key exists to prevent
+    /// produces the second, silent face — the reason the guarantee cannot be left to a store-level
+    /// error to enforce.
     ///
     /// Canonicalizing here is what makes two handles *compare* equal; it is not what makes them
     /// reach one node. A name may be taken before the directory exists, and the filesystem can move
@@ -257,9 +268,11 @@ pub fn backend_for<C: NativeCtx + ?Sized>(
 /// - **A settled key that collides with a live node yields that node.** The incumbent is this
 ///   directory's node, by definition — there is nothing to reconcile and nothing to fail. Because
 ///   nothing has been built yet, the collision is resolved by *not building*, which matters: a
-///   second p2panda node on one `store.db` does not merely waste a socket, it collides on the
-///   store's own migration (`index ux_orderer_pending_v1 already exists`), so "build, then discover
-///   the collision, then tear down" would have to survive the very failure it is preventing.
+///   second p2panda node started on a live node's directory does not announce itself. It comes up,
+///   loads the same `identity.key`, and appends to the same `store.db` under the same peer id (see
+///   [`NodeConfig::at`] for both measured faces of that). "Build, then notice, then tear down"
+///   would therefore be relying on a failure that does not reliably arrive, having already done
+///   the writing.
 /// - **A collision can never be discovered after building.** The settled key is looked up before
 ///   `create_backend` and the map cannot change across it (see below), so the insert below is
 ///   always into a vacant entry.
