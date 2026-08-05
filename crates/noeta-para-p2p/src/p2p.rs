@@ -16,14 +16,33 @@
 
 use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_ext_abi::{
-    CtxError, CtxOut, NativeCtx, NativeValue, Slot, ctx_arity, no_function_error, type_error,
+    CtxError, CtxOut, ExternBox, NativeCtx, NativeValue, Slot, ctx_arity, no_function_error,
+    type_error,
 };
 
-use crate::provider::{receive_descriptor, with_p2p};
+use crate::node::NodeBox;
+use crate::provider::{NodeConfig, host_node_config, receive_descriptor, with_p2p};
 
 const MESSAGE_SIG: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
 
 pub const P2P_FNS: &[ExtFn] = &[
+    // `open(dir) -> Node` — the node whose identity, durable store and encryption credentials live
+    // in `dir`. Naming a node neither creates the directory nor starts the node: it starts lazily
+    // on first use, exactly like the default one.
+    ExtFn {
+        name: "open",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named(crate::node::NODE_TYPE_NAME)),
+        ..ExtFn::DEFAULTS
+    },
+    // `node() -> Node` — the default node, the one the free functions below run on, as a value a
+    // program can pass around.
+    ExtFn {
+        name: "node",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named(crate::node::NODE_TYPE_NAME)),
+        ..ExtFn::DEFAULTS
+    },
     // `publish(topic, message)` — send `message` (a string as its UTF-8 bytes, or raw bytes) to
     // everyone subscribed to `topic`.
     ExtFn {
@@ -60,6 +79,25 @@ pub fn p2p_ctx_dispatch<C: NativeCtx + ?Sized>(
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
     match func {
+        // Naming a node: a pure value, no side effect and no failure. The directory is
+        // canonicalized into the name (see `NodeConfig::at`) so every spelling of one directory is
+        // one node.
+        "open" => {
+            ctx_arity(func, args, 1)?;
+            let dir = view_str(ctx, func, args, 0)?;
+            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(NodeBox {
+                config: Some(NodeConfig::at(dir)),
+            }))))
+        }
+        // The default node as a value — the same name the free functions resolve, so
+        // `p2p.node().publish(t, m)` and `p2p.publish(t, m)` reach one node.
+        "node" => {
+            ctx_arity(func, args, 0)?;
+            let config = host_node_config(ctx);
+            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(NodeBox {
+                config,
+            }))))
+        }
         "publish" => {
             ctx_arity(func, args, 2)?;
             let topic = view_str(ctx, func, args, 0)?;

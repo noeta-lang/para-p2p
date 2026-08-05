@@ -53,7 +53,7 @@ use noeta_ext_abi::registry::ExtCapability;
 use noeta_reactive_abi::{ReactiveSource, ViewSource, ViewSourceExtract};
 
 use crate::crdt::{from_bytes_like, merge_dyn, to_bytes_dyn};
-use crate::provider::with_p2p;
+use crate::provider::with_node;
 
 /// Obtain the reactive engine's `ReactiveSource` capability for this run — the seam a synced signal
 /// (a node over the shared graph) drives its create/read/wake through. Present whenever `std.reactive`
@@ -183,6 +183,11 @@ pub struct SyncedSignalBox {
     /// sandbox treats it as a transparent pass-through (the decrypted value equals the plaintext
     /// value), so an encrypted program stays oracle byte-identical.
     pub members: Vec<String>,
+    /// **Which p2p node this signal replicates through** — the name of the node it subscribed on,
+    /// carried so `merge` / `sync` / `status` / membership reach that same node rather than
+    /// whichever one the host names. `None` is the host's default node, which is what
+    /// `para.synced.synced_signal` uses and what every signal used before nodes were nameable.
+    pub p2p_node: Option<crate::provider::NodeConfig>,
 }
 
 impl SyncedSignalBox {
@@ -225,13 +230,32 @@ pub fn synced_ctx_dispatch(
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
     match func {
+        // The free form: a signal on the run's **default** node — the sugar every single-identity
+        // program uses, and what this function has always meant.
         "synced_signal" => {
+            let node = crate::provider::host_node_config(ctx);
+            create_synced_signal(ctx, node, func, args)
+        }
+        _ => Err(no_function_error("synced", func).into()),
+    }
+}
+
+/// Build a `SyncedSignal` on the node `node` names. `args` is `(initial, topic, members?)` for both
+/// spellings — the node-scoped form strips its leading `Node` before calling.
+pub fn create_synced_signal(
+    ctx: &mut dyn NativeCtx,
+    node: Option<crate::provider::NodeConfig>,
+    func: &str,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    {
+        {
             // 2 required args (initial, topic); an optional 3rd (members) opts into encryption.
             if args.len() < 2 || args.len() > 3 {
                 return Err(StdError {
                     kind: ErrorKind::Arity,
                     message: format!(
-                        "`synced_signal` takes 2 or 3 arguments but {} were supplied",
+                        "`{func}` takes 2 or 3 value arguments but {} were supplied",
                         args.len()
                     ),
                 }
@@ -267,31 +291,31 @@ pub fn synced_ctx_dispatch(
             // (`members` given) routes through the group transport, which encrypts the announce to
             // the declared members; a plaintext signal uses the durable transport directly.
             let subscription = if members.is_empty() {
-                with_p2p(ctx, |p| p.p2p_subscribe_durable(&topic))?
+                with_node(ctx, node.clone(), |p| p.p2p_subscribe_durable(&topic))?
             } else {
-                with_p2p(ctx, |p| p.p2p_group_open(&topic, &members))?
+                with_node(ctx, node.clone(), |p| p.p2p_group_open(&topic, &members))?
             };
             if members.is_empty() {
-                with_p2p(ctx, |p| p.p2p_publish_durable(&topic, bytes))?;
+                with_node(ctx, node.clone(), |p| p.p2p_publish_durable(&topic, bytes))?;
             } else {
-                with_p2p(ctx, |p| p.p2p_group_publish(&topic, bytes))?;
+                with_node(ctx, node.clone(), |p| p.p2p_group_publish(&topic, bytes))?;
             }
-            // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
+            // The CRDT lives in an arena cell; the graph node is a signal in the shared reactive
+            // graph. (`graph_node` here, not `node` — `node` is the *p2p* node this replicates on.)
             let cell = ctx.retain(args[0])?;
-            // A signal node in the shared reactive graph over the arena cell holding the CRDT.
             let rx = reactive(ctx);
-            let node = rx.create_source(ctx, cell);
+            let graph_node = rx.create_source(ctx, cell);
             Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(
                 SyncedSignalBox {
-                    node,
+                    node: graph_node,
                     cell,
                     subscription,
                     topic,
                     members,
+                    p2p_node: node,
                 },
             ))))
         }
-        _ => Err(no_function_error("synced", func).into()),
     }
 }
 
@@ -323,9 +347,13 @@ pub fn synced_ctx_method_dispatch(
             let rx = reactive(ctx);
             rx.wake(ctx, handle.node)?;
             if handle.is_encrypted() {
-                with_p2p(ctx, |p| p.p2p_group_publish(&handle.topic, bytes))?;
+                with_node(ctx, handle.p2p_node.clone(), |p| {
+                    p.p2p_group_publish(&handle.topic, bytes)
+                })?;
             } else {
-                with_p2p(ctx, |p| p.p2p_publish_durable(&handle.topic, bytes))?;
+                with_node(ctx, handle.p2p_node.clone(), |p| {
+                    p.p2p_publish_durable(&handle.topic, bytes)
+                })?;
             }
             Ok(CtxOut::Out(NativeOut::Unit))
         }
@@ -336,7 +364,7 @@ pub fn synced_ctx_method_dispatch(
             ctx_arity(method, args, 0)?;
             let mut changed = false;
             let encrypted = handle.is_encrypted();
-            while let Some(bytes) = with_p2p(ctx, |p| {
+            while let Some(bytes) = with_node(ctx, handle.p2p_node.clone(), |p| {
                 if encrypted {
                     p.p2p_group_poll(handle.subscription)
                 } else {
@@ -366,7 +394,9 @@ pub fn synced_ctx_method_dispatch(
         // This replica's convergence state for its topic — a plain lowercase word (p2p P3.3).
         "status" => {
             ctx_arity(method, args, 0)?;
-            let status = with_p2p(ctx, |p| Ok(p.p2p_sync_status(&handle.topic)))?;
+            let status = with_node(ctx, handle.p2p_node.clone(), |p| {
+                Ok(p.p2p_sync_status(&handle.topic))
+            })?;
             Ok(CtxOut::Out(NativeOut::Str(status.as_str().to_string())))
         }
         // Runtime membership changes for an encrypted group (p2p P3.4b). Only valid on an encrypted
@@ -387,9 +417,13 @@ pub fn synced_ctx_method_dispatch(
                 _ => return Err(type_error(method, "a peer-id string").into()),
             };
             if method == "add_member" {
-                with_p2p(ctx, |p| p.p2p_group_add(&handle.topic, &member))?;
+                with_node(ctx, handle.p2p_node.clone(), |p| {
+                    p.p2p_group_add(&handle.topic, &member)
+                })?;
             } else {
-                with_p2p(ctx, |p| p.p2p_group_remove(&handle.topic, &member))?;
+                with_node(ctx, handle.p2p_node.clone(), |p| {
+                    p.p2p_group_remove(&handle.topic, &member)
+                })?;
             }
             Ok(CtxOut::Out(NativeOut::Unit))
         }

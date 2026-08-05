@@ -28,9 +28,10 @@ class Lww {
 
     impl Syncable {
         fn to_bytes(): bytes { return "${self.at}|${self.value}".to_bytes() }
-        // Decode-and-merge in one step: a trait method has a `Self` receiver, so there is nowhere
-        // to hang a static `from_bytes` — and the engine always holds the current value when peer
-        // state arrives. Undecodable input answers with `self`, which reads as "nothing changed".
+        // Decode-and-merge in one step, rather than a separate `from_bytes`: the engine always
+        // holds the current value when peer state arrives, so this is the whole operation.
+        // Undecodable input answers with `self`, which reads as "nothing changed" — an answer a
+        // decoder that had to *produce* a value could not give.
         fn merge_bytes(other: bytes): Lww {
             parts = (other.decode() ?? "").split("|", 2)
             at = if parts.len() > 0 then parts[0].to_int() ?? 0 else 0
