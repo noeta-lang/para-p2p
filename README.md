@@ -22,7 +22,7 @@ The Rust crates behind that surface:
 
 ```toml
 [dependencies]
-para = { version = "^0.3", package = "para/p2p" }
+para = { version = "^0.5", package = "para/p2p" }
 
 [trust]
 native = ["para/p2p"]   # authorizes the package's native extension

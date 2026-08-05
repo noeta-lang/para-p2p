@@ -9,8 +9,9 @@ rust-version = "1.95"
 [dependencies]
 # The convergence core (dep-free CRDTs) and the extension ABI.
 noeta-crdt = { path = "../noeta-crdt" }
-# Pinned to the toolchain release this package version is built against.
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
+# The extension contract is a published, semver-stable crate from noeta 0.5 on — a range, not a git
+# pin, so a consumer resolves one copy of the ABI against any 0.5.x toolchain.
+noeta-ext-abi = "0.5"
 # The document CRDT behind `para.crdt.AutoDoc` (see `autodoc.rs`). p2panda ships no application
 # CRDT by design ("compatible with any application data and CRDT"), so the value layer is ours to
 # choose; automerge's save/load/merge match this package's `Syncable`/`Mergeable` contracts
@@ -19,12 +20,12 @@ automerge = "0.10"
 # `synced` is a node in the SAME reactive graph as core `std.reactive`, reached through the
 # `ReactiveSource` **capability** (`noeta_ext_abi::capability::<dyn ReactiveSource>`): create_source /
 # read_source / wake + the view-source hook — never the engine internals. The contract lives in the
-# tiny `noeta-reactive-abi` crate, so this extension depends on **nothing of `noeta-stdlib`**; the
-# engine implements the same trait on the other side. noeta-reactive supplies the `NodeId` handle.
-# Pinned to the toolchain release this package version is built against.
-noeta-reactive = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
-# Pinned to the toolchain release this package version is built against.
-noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
+# tiny `noeta-reactive-abi` crate, so this extension depends on **nothing of `noeta-stdlib`** and
+# nothing of the engine crate either; the engine implements the same trait on the other side. From
+# noeta 0.5 the `NodeId` handle lives in the ABI crate too, so `noeta-reactive` (an internal,
+# unpublished engine crate) is no longer a dependency at all.
+# Published and semver-stable from noeta 0.5 on — a range, not a git pin.
+noeta-reactive-abi = "0.5"
 # The real p2panda transport (para-namespace F2b). Optional and behind the `ring-p2p` ring: when a
 # host permits real networking (`RealHost`) this crate owns a live p2panda node; off ⇒ the extension
 # uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC.
@@ -44,12 +45,25 @@ ring-p2p = ["dep:noeta-para-p2p-net"]
 # The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
 # (the fixtures resolve `para.*`, which the default std-only registry cannot).
 # Pinned to the toolchain release this package version is built against.
-noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
+noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
 # **Test-only** (a dev-dependency — it does not ship): the harness installs the full `std` runtime so
 # the fixtures actually execute. The library itself depends on nothing of `noeta-stdlib` — it reaches
 # the reactive engine purely through the `noeta-reactive-abi` capability contract.
 # Pinned to the toolchain release this package version is built against.
-noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.3.1" }
+noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
+
+# The contract crates ship BOTH ways: published on crates.io (what `[dependencies]` above names) and
+# as path members inside the toolchain repo (what the git-pinned dev-dependencies above resolve to,
+# since a git dependency keeps its own repo's path deps). Linking both copies gives the test build
+# two distinct `Extension` traits, and `impl Extension for ParaP2pExtension` then fails to satisfy
+# the one the harness wants (E0277 "multiple different versions of crate `noeta_ext_abi`"). Redirect
+# the crates.io names onto the very git checkout the dev-dependencies use, so exactly one copy of the
+# contract exists. Cargo honors `[patch]` only in the workspace root it is building, so this governs
+# this repo's own `cargo test` and is silently ignored when the crate is consumed as a dependency —
+# a consumer's composed toolchain applies its own `[patch]` to the same effect.
+[patch.crates-io]
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
+noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
 
 # Inlined from the monorepo's [workspace.lints] (this crate is standalone now).
 [lints.rust]
