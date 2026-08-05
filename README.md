@@ -180,7 +180,9 @@ echo alice.identity()                       // alice's own Ed25519 key, not bob'
 counter = bob.synced_signal(crdt.gcounter(), "tally")
 ```
 
-A `Node` is **a name, not a resource**: it holds no socket, so nothing has to be closed, and `p2p.open` neither creates the directory nor starts the node — the node starts on first use, like the default one always has. Opening one directory twice reaches one live node however you spell the path (`/srv/a`, `/srv/a/`, a relative path, a symlink all resolve to the same node), because two nodes sharing one store would corrupt it.
+A `Node` is **a name, not a resource**: it holds no socket, so nothing has to be closed, and `p2p.open` neither creates the directory nor starts the node — the node starts on first use, like the default one always has. Opening one directory twice reaches one live node however you spell the path (`/srv/a`, `/srv/a/`, a relative path, a symlink all resolve to the same node), because two nodes sharing one store would corrupt it. That holds even when the first handle was opened *before* the directory existed: a name taken that early cannot resolve the part of the path that is not there yet, so it is resolved once more — against the filesystem as it is — before it is allowed to start anything.
+
+One spelling is deliberately not pinned: a **relative** path is resolved against the working directory at the moment you call `p2p.open`, so a program that changes directory between two `p2p.open("data")` calls has named two different directories, and gets two nodes. That is what those two paths mean, and it is what a relative path means everywhere else in the language.
 
 `p2p.node()` is the default node as a value, so a function can take a `Node` and work for either.
 

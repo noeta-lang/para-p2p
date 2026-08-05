@@ -42,6 +42,12 @@ pub const NODE_TYPE_IDENTITY: &str = "para.p2p.Node";
 /// The extern box: just the node's name. Cloning it aliases the same live node (reference
 /// semantics, like every other handle), and equality is by config — two `p2p.open` calls on one
 /// directory produce equal handles, which is the program-visible form of "one directory, one node".
+///
+/// Equality is the *name's* answer, and it is the weaker of the two: it is a pure function of the
+/// config and cannot re-walk the filesystem, so two handles opened either side of a symlink
+/// appearing under a not-yet-created directory compare unequal while still reaching one live node
+/// (the registry settles that at first use — see [`crate::provider::backend_in`]). Unequal handles
+/// may share a node, never the reverse: equal handles always mean one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeBox {
     /// The node this handle names, or `None` for "whatever the host permits" — the default node on
