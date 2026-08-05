@@ -27,6 +27,13 @@
 //! already a tested p2panda configuration (each node builds its own runtime, endpoint, store and
 //! signing key; only mDNS multicast is shared, and it is best-effort).
 //!
+//! Because that map key is the whole guarantee, the directory is resolved **twice**: once when the
+//! node is named ([`canonical_dir`], so every spelling of an existing directory is one key) and once
+//! more when a key first misses the registry and is about to start a node ([`settle_key`], so a name
+//! taken before its directory existed cannot start a *second* node against the same
+//! `identity.key`/`store.db`). See [`backend_in`] for why the second resolution has to happen before
+//! the node is built rather than after.
+//!
 //! The loopback broker is deliberately **not** keyed: on a host with no real networking every
 //! config collapses onto [`NodeConfig::default`], so two replicas in one program still converge
 //! through the one deterministic log (the sandbox's stand-in for two peers) and every oracle
@@ -69,8 +76,32 @@ impl NodeConfig {
     /// key: `/srv/a`, `/srv/a/`, `srv/a` from the right working directory and a symlink pointing at
     /// any of them are one node, and keying them separately would start several nodes against one
     /// `identity.key` and one `store.db`. That is a demonstrated corruption mode, not a theoretical
-    /// one — two nodes sharing a store collide on the store's own migration
-    /// (`index ux_orderer_pending_v1 already exists`).
+    /// one, and it has two faces — both measured against this transport:
+    ///
+    /// - **Overlapping starts fail loudly**: two nodes building their stores at once collide on the
+    ///   store's own migration (`p2p store: while executing migration 20250928132846: … index
+    ///   ux_orderer_pending_v1 already exists`), and one of them does not start at all.
+    /// - **Staggered starts fail silently**, which is worse. Both nodes come up, both load the same
+    ///   `identity.key`, so they are two independent nodes *presenting the same peer id*, appending
+    ///   to one `store.db` and one `spaces.db` through two connections that know nothing of each
+    ///   other. Nothing reports anything.
+    ///
+    /// A registry serializes its own creations, so the split-key defect this key exists to prevent
+    /// produces the second, silent face — the reason the guarantee cannot be left to a store-level
+    /// error to enforce.
+    ///
+    /// Canonicalizing here is what makes two handles *compare* equal; it is not what makes them
+    /// reach one node. A name may be taken before the directory exists, and the filesystem can move
+    /// under an unresolved tail afterwards, so the registry resolves the name once more before it
+    /// starts anything ([`settle_key`]) — that, not this, is the guarantee. The consequence worth
+    /// knowing: two handles opened either side of such a move reach the same live node but compare
+    /// unequal, because equality is a pure function of the name and cannot re-walk the filesystem.
+    ///
+    /// A **relative** path is resolved against the working directory at the moment `open` is called,
+    /// which is deliberate: that is what a relative path means everywhere else in the language, and
+    /// a program that `chdir`s between two `open("data")` calls has named two genuinely different
+    /// directories. Pinning the first one would make the meaning depend on invisible history rather
+    /// than on the visible working directory.
     pub fn at(dir: impl Into<PathBuf>) -> NodeConfig {
         NodeConfig {
             app_id: None,
@@ -100,6 +131,24 @@ impl NodeConfig {
 /// The transport creates the directory when the node actually starts, which is where a permission
 /// error belongs. (`.` segments and a trailing slash need no handling: [`Path`] compares and hashes
 /// by component, so `/a/./b/` and `/a/b` are already the same key.)
+///
+/// # This is a resolution, not a decision — it is redone at first use
+///
+/// Carrying the tail literally is the best answer *available at naming time*, but it is not final:
+/// it is an answer about a path that does not exist, and the filesystem can still move under it.
+/// One spelling therefore still splits into two names if a **symlink appears at a not-yet-existing
+/// tail segment between two `open`s** — measured, not hypothetical:
+///
+/// ```text
+/// named before `link` exists : /root/link/alice          (tail carried literally)
+/// symlink link -> elsewhere
+/// named after                : /root/elsewhere/alice     (now resolved through it)
+/// ```
+///
+/// Two names, one directory on disk — which is two p2panda nodes on one `identity.key` and one
+/// `store.db` if the names are allowed to reach the registry as they are. [`settle_key`] is what
+/// stops them: the registry re-runs this against the filesystem *as it is at first use*, and both
+/// spellings above settle onto `/root/elsewhere/alice`.
 fn canonical_dir(dir: &Path) -> PathBuf {
     let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -202,6 +251,51 @@ pub fn backend_for<C: NativeCtx + ?Sized>(
 /// The **node registry** itself, over a plain map — [`backend_for`] minus the ctx-state plumbing.
 /// One directory reaches one live node because one key reaches one map entry; this is where that
 /// happens, and it is separated out so the property is testable without a whole `NativeCtx`.
+///
+/// # A name is resolved twice: once when taken, once before it starts a node
+///
+/// A miss is the only moment a key can still be wrong, and it is exactly the moment being wrong
+/// gets expensive — a miss is what *starts a node*. The key was resolved when the node was
+/// **named**, possibly before its directory existed, so it may carry an unresolved tail
+/// ([`canonical_dir`]); a symlink appearing at one of those segments in the meantime splits one
+/// directory into two names. So on a miss, and only on a miss, the key is resolved again against
+/// the filesystem as it is *now* ([`settle_key`]) — after which a handle opened before the
+/// directory existed and one opened after are the same entry, in either order.
+///
+/// Two things follow from settling *before* [`create_backend`] rather than after, which is the
+/// whole reason it happens here:
+///
+/// - **A settled key that collides with a live node yields that node.** The incumbent is this
+///   directory's node, by definition — there is nothing to reconcile and nothing to fail. Because
+///   nothing has been built yet, the collision is resolved by *not building*, which matters: a
+///   second p2panda node started on a live node's directory does not announce itself. It comes up,
+///   loads the same `identity.key`, and appends to the same `store.db` under the same peer id (see
+///   [`NodeConfig::at`] for both measured faces of that). "Build, then notice, then tear down"
+///   would therefore be relying on a failure that does not reliably arrive, having already done
+///   the writing.
+/// - **A collision can never be discovered after building.** The settled key is looked up before
+///   `create_backend` and the map cannot change across it (see below), so the insert below is
+///   always into a vacant entry.
+///
+/// The stale key is recorded as an **alias** onto the same `Arc` rather than dropped, so a handle
+/// that outran its directory costs one extra map entry instead of a filesystem walk on every
+/// `publish`. It also pins that handle to the node it woke: re-settling on every call would let a
+/// live handle migrate to a *different* node mid-run if the filesystem moved again.
+///
+/// # Racing
+///
+/// Nothing in one run can interleave with the settle→lookup→create→insert sequence: the registry
+/// lives in ctx state behind a `RefCell` whose borrow is held across the whole of this call
+/// ([`backend_for`]), and building a node touches no ctx state, so there is no re-entry point. A
+/// concurrent `open` in the same run cannot observe a half-updated map, and cannot even reach one.
+///
+/// What this cannot serialize is a registry it does not own: a second run/isolate in the process
+/// has its own ctx state, and another OS process has its own everything. Two of those naming one
+/// directory are two nodes on one store, exactly as before — closing that needs an on-disk lock in
+/// the transport, not a key in this map. Likewise the filesystem itself is not held still: another
+/// process can plant a symlink between [`settle_key`] and the transport's own `create_dir_all`. The
+/// window is two adjacent syscalls wide and needs an actively hostile neighbor, where the defect
+/// this closes needed only a program that opened a handle a little early.
 pub fn backend_in(
     nodes: &mut HashMap<Option<NodeConfig>, P2pBackend>,
     requested: Option<NodeConfig>,
@@ -211,9 +305,38 @@ pub fn backend_in(
     if let Some(backend) = nodes.get(&key) {
         return Ok(backend.clone());
     }
-    let backend = create_backend(key.clone())?;
-    nodes.insert(key, backend.clone());
+    let settled = settle_key(key.clone());
+    let moved = settled != key;
+    if moved && let Some(backend) = nodes.get(&settled) {
+        // This directory already has a live node under its settled name — that node *is* the
+        // directory's node. Hand it back and alias the stale spelling onto it.
+        let backend = backend.clone();
+        nodes.insert(key, backend.clone());
+        return Ok(backend);
+    }
+    let backend = create_backend(settled.clone())?;
+    if moved {
+        nodes.insert(key, backend.clone());
+    }
+    nodes.insert(settled, backend.clone());
     Ok(backend)
+}
+
+/// Resolve a key against the filesystem **as it is now** — [`canonical_dir`] re-run at first use,
+/// which is what makes a name taken before its directory existed land on the same node as one taken
+/// after.
+///
+/// Total and side-effect-free, like the naming it repeats: it creates nothing, and a path it still
+/// cannot resolve comes back unchanged (a key that stays literal is at least stable). Only a key
+/// that *names a directory* does any work — the loopback broker's `None` key and the default node's
+/// `data_dir: None` walk no filesystem at all, so a build without the ring (where
+/// [`backend_key`] collapses every request onto `None`) never touches the disk here.
+fn settle_key(key: Option<NodeConfig>) -> Option<NodeConfig> {
+    let mut config = key?;
+    if let Some(dir) = config.data_dir.take() {
+        config.data_dir = Some(canonical_dir(&dir));
+    }
+    Some(config)
 }
 
 /// The ctx-state key a request resolves to. A real node keys on its own config (identity + dir);
@@ -437,6 +560,104 @@ mod tests {
             "one directory must reach one live node"
         );
         assert_eq!(nodes.len(), 1, "and must occupy one registry entry");
+    }
+
+    /// A directory named **before it exists** and the same directory named after are one node.
+    ///
+    /// This is the hole [`canonical_dir`] alone cannot close: a name taken before the directory
+    /// existed carries its tail literally, so a symlink appearing at one of those segments in
+    /// between makes the second spelling resolve somewhere the first does not — two keys for one
+    /// directory on disk, which under the ring is two p2panda nodes on one `identity.key` and one
+    /// `store.db`. Asserted in **both** orders (early handle used first, late handle used first),
+    /// and on pointer identity, because two backends that merely compare equal would still be two
+    /// nodes on one store.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_taken_before_its_directory_existed_reaches_one_node() {
+        for (tag, early_first) in [("race-early", true), ("race-late", false)] {
+            let root = TempDir::new(tag);
+            let target = root.0.join("elsewhere");
+            std::fs::create_dir_all(&target).expect("the directory the link will point at");
+            let real = target.canonicalize().expect("the link target resolves");
+            let spelling = root.0.join("link").join("alice");
+
+            // Named while nothing exists at `link`: the tail is carried literally.
+            let early = NodeConfig::at(&spelling);
+            // …then a symlink appears at exactly that not-yet-existing segment.
+            std::os::unix::fs::symlink(&target, root.0.join("link")).expect("symlink");
+            // The same spelling, named again — now resolved through the link.
+            let late = NodeConfig::at(&spelling);
+            assert_ne!(
+                early, late,
+                "the premise: two names for one directory, which is what the registry must absorb"
+            );
+            let through_link = spelling
+                .parent()
+                .expect("the linked segment")
+                .canonicalize()
+                .expect("the link resolves");
+            assert_eq!(
+                through_link, real,
+                "and they really are one directory on disk"
+            );
+
+            let mut nodes = HashMap::new();
+            let (first, second) = if early_first {
+                (early, late)
+            } else {
+                (late, early)
+            };
+            let a = backend_in(&mut nodes, Some(first), true).expect("first open");
+            let b = backend_in(&mut nodes, Some(second), true).expect("second open");
+            assert!(
+                std::sync::Arc::ptr_eq(&a, &b),
+                "one directory must reach one live node, however early its name was taken"
+            );
+            // Under the ring that node is a *real* p2panda node, not the broker standing in for one
+            // — so this is the store-sharing case being pinned, not a loopback look-alike. (The
+            // broker has no identity, which is what distinguishes them.)
+            let identity = a
+                .lock()
+                .expect("p2p backend mutex")
+                .p2p_identity()
+                .expect("identity");
+            assert_eq!(identity.is_some(), cfg!(feature = "ring-p2p"));
+        }
+    }
+
+    /// The rule the registry leans on, on its own: re-resolving a key against the filesystem as it
+    /// is *now* collapses a name that outran its directory onto the name of the directory itself.
+    /// Build-independent — without the ring every key is `None`, so this is the only place the
+    /// property is observable there.
+    #[cfg(unix)]
+    #[test]
+    fn settling_a_key_collapses_a_name_that_outran_its_directory() {
+        let root = TempDir::new("settle");
+        let target = root.0.join("elsewhere");
+        std::fs::create_dir_all(&target).expect("link target");
+        let spelling = root.0.join("link").join("alice");
+
+        let early = NodeConfig::at(&spelling);
+        std::os::unix::fs::symlink(&target, root.0.join("link")).expect("symlink");
+        let late = NodeConfig::at(&spelling);
+        assert_ne!(early, late);
+
+        assert_eq!(
+            settle_key(Some(early.clone())),
+            settle_key(Some(late.clone())),
+            "both names settle onto the one directory"
+        );
+        // The settled name is the link's *target*, spelled with std's own `canonicalize` — an
+        // oracle independent of `canonical_dir` — and settling it again changes nothing.
+        let settled = settle_key(Some(early)).expect("a named node has a config");
+        let expected = target.canonicalize().expect("target").join("alice");
+        assert_eq!(settled.data_dir.as_deref(), Some(expected.as_path()));
+        assert_eq!(settle_key(Some(settled.clone())), Some(settled));
+        // And it resolves nothing it is not asked to: the broker's key and the default node's
+        // dir-less config come back untouched, so a loopback build walks no filesystem.
+        assert_eq!(settle_key(None), None);
+        let default = NodeConfig::default().with_app(Some("acme/chat".into()));
+        assert_eq!(settle_key(Some(default.clone())), Some(default));
     }
 
     /// Two distinct directories in one process are two nodes — the multi-identity property, at the

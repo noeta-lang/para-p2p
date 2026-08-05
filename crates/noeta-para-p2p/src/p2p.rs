@@ -81,7 +81,8 @@ pub fn p2p_ctx_dispatch<C: NativeCtx + ?Sized>(
     match func {
         // Naming a node: a pure value, no side effect and no failure. The directory is
         // canonicalized into the name (see `NodeConfig::at`) so every spelling of one directory is
-        // one node.
+        // one node — including a directory that does not exist yet, whose name the registry
+        // resolves once more before it starts anything (`provider::backend_in`).
         "open" => {
             ctx_arity(func, args, 1)?;
             let dir = view_str(ctx, func, args, 0)?;
