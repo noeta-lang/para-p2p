@@ -44,7 +44,7 @@ use noeta_ext_abi::{
     Retained, Slot, StdError, capability, ctx_arity, no_function_error, no_method_error,
     type_error,
 };
-use noeta_reactive::NodeId;
+use noeta_reactive_abi::NodeId;
 // `synced` shares the SAME reactive graph as core `std.reactive`: a synced signal IS a node in that
 // graph, so a peer's merge propagates to `computed`/`effect` like a local `set`. It reaches the
 // engine through the `ReactiveSource` **capability** (never the engine's internals), and depends on

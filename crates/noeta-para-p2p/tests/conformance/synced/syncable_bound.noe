@@ -4,16 +4,21 @@
 //
 // So a type that merges perfectly but has no encoding is refused — and refused *naming `Syncable`*,
 // rather than with a blanket "not a CRDT" that would send you looking at your merge.
-// expect: error E0025 at 22:5
+// expect: error E0025 at 27:5
 // expect: exit 1
 use para.crdt.{Mergeable}
 use para.synced.{synced_signal}
 
 class Local {
     pub at: int
-    fn new(at: int): Local { return Local { at: at } }
+    // `pub` on both, as of noeta 0.5: methods are private by default in every type kind, and a
+    // trait-implementing method must say so outright (E0015). Spelled here so the ONE error this
+    // fixture asserts is the bound — the harness only checks that its expected error is among the
+    // ones produced, so an unrelated diagnostic would ride along unnoticed and the fixture would
+    // still "pass" while no longer demonstrating what it claims.
+    pub fn new(at: int): Local { return Local { at: at } }
     impl Mergeable {
-        fn merge(other: Local): Local {
+        pub fn merge(other: Local): Local {
             return if other.at > self.at then other else self
         }
     }

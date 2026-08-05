@@ -18,21 +18,25 @@ class Lww {
     pub at: int
     pub value: string
 
-    fn new(at: int, value: string): Lww { return Lww { at: at, value: value } }
+    // `pub` throughout, as of noeta 0.5: methods are private by default in every type kind, and
+    // this constructor is called from outside the class. The `impl` methods below must say `pub`
+    // too — a trait is an outward contract, so implementing one and hiding the method is a
+    // contradiction the checker rejects outright (E0015), not merely a visibility a caller trips on.
+    pub fn new(at: int, value: string): Lww { return Lww { at: at, value: value } }
 
     impl Mergeable {
-        fn merge(other: Lww): Lww {
+        pub fn merge(other: Lww): Lww {
             return if other.at > self.at then other else self
         }
     }
 
     impl Syncable {
-        fn to_bytes(): bytes { return "${self.at}|${self.value}".to_bytes() }
+        pub fn to_bytes(): bytes { return "${self.at}|${self.value}".to_bytes() }
         // Decode-and-merge in one step, rather than a separate `from_bytes`: the engine always
         // holds the current value when peer state arrives, so this is the whole operation.
         // Undecodable input answers with `self`, which reads as "nothing changed" — an answer a
         // decoder that had to *produce* a value could not give.
-        fn merge_bytes(other: bytes): Lww {
+        pub fn merge_bytes(other: bytes): Lww {
             parts = (other.decode() ?? "").split("|", 2)
             at = if parts.len() > 0 then parts[0].to_int() ?? 0 else 0
             text = if parts.len() > 1 then parts[1] else ""
