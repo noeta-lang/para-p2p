@@ -20,9 +20,15 @@ The Rust crates behind that surface:
 
 ## Installation
 
+```sh
+noeta add para/p2p
+```
+
+That asks the registry for the current release and writes the caret requirement for it, so no version is pinned here to go stale. It adds:
+
 ```toml
 [dependencies]
-para = { version = "^0.4", package = "para/p2p" }
+para = { version = "^X.Y", package = "para/p2p" }
 
 [trust]
 native = ["para/p2p"]   # authorizes the package's native extension
