@@ -1,0 +1,38 @@
+// para.crdt — `OrSet`, an observed-remove set. The first line is the whole reason the type exists:
+// an element removed and then added again is *present*. A set that kept a list of removed elements
+// and subtracted it could not say that — the second add would be swallowed on every replica,
+// forever — and "I deleted the wrong one, put it back" is the first thing anybody does.
+// expect: stdout "removed=false re_added=true"
+// expect: stdout "members=[\"apples\", \"pears\"] len=2"
+// expect: stdout "add_wins=true"
+// expect: stdout "no_resurrection=[\"keep\"]"
+// expect: stdout "mixed=[1, \"one\"]"
+// expect: exit 0
+use para.{crdt}
+
+// Remove, then add again.
+one = crdt.orset().insert("A", "pears")
+gone = one.remove("pears")
+back = gone.insert("A", "pears")
+echo "removed=${gone.contains("pears")} re_added=${back.contains("pears")}"
+
+both = back.insert("A", "apples")
+echo "members=${both.members()} len=${both.len()}"
+
+// A remove only covers the insertions it could *observe*. B's add was concurrent with A's remove,
+// so the element stays — the intuitive answer when two people edit at once, and the same one on
+// both replicas.
+removed_by_a = crdt.orset().insert("A", "x").remove("x")
+added_by_b = crdt.orset().insert("B", "x")
+echo "add_wins=${removed_by_a.merge(added_by_b).contains("x") && added_by_b.merge(removed_by_a).contains("x")}"
+
+// The other direction: a peer that never saw the removal must not resurrect the element merely by
+// merging its older state in.
+seeded = crdt.orset().insert("A", "keep").insert("A", "drop")
+trimmed = seeded.remove("drop")
+echo "no_resurrection=${seeded.merge(trimmed).members()}"
+
+// Elements are application values, not only strings — and a number is not its own text, so a set
+// holding both holds two members.
+mixed = crdt.orset().insert("A", 1).insert("A", "one")
+echo "mixed=${mixed.members()}"

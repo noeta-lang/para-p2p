@@ -8,7 +8,7 @@ This package is **fully native**: its whole surface is a Rust extension (there i
 
 Three modules, all rooted at `para`:
 
-- **`para.crdt`** — state-based CRDT value types: `crdt.gcounter()`, `crdt.pncounter()`, `crdt.gset()`, and the Automerge-backed document `crdt.automerge()`. Merge is commutative, associative, and idempotent, so independent replicas converge to the same value regardless of the order or duplication of the updates they exchange. The set is **open**: `Mergeable` and `Syncable` are ordinary traits your own type can implement.
+- **`para.crdt`** — state-based CRDT value types: `crdt.gcounter()`, `crdt.pncounter()`, `crdt.gset()`, `crdt.lww()`, `crdt.orset()`, and the Automerge-backed document `crdt.automerge()`. Merge is commutative, associative, and idempotent, so independent replicas converge to the same value regardless of the order or duplication of the updates they exchange. The set is **open**: `Mergeable` and `Syncable` are ordinary traits your own type can implement.
 - **`para.p2p`** — `publish` / `receive` / `identity` over the `P2p` host capability, on the default node or on one you `p2p.open(dir)` yourself (several peer identities in one program). With the real transport (the `ring-p2p` feature of the extension crate) that is a live p2panda node — gossip + log-sync over iroh/QUIC; without it, a deterministic in-process loopback broker, so plain builds and tests never link the networking tree.
 - **`para.synced`** — `synced_signal(crdt, topic)`: a CRDT-backed signal that is a node in the **same** reactive graph as core `std.reactive` — a merge (local or from a peer) reruns dependent `computed`/`effect`s. Over the real transport it adds end-to-end group encryption and dynamic membership.
 
@@ -65,9 +65,38 @@ A CRDT is a value whose concurrent edits **merge** into the same result regardle
 | `crdt.gcounter()` | `GCounter` | A grow-only counter (only increments). |
 | `crdt.pncounter()` | `PnCounter` | A counter that also decrements. |
 | `crdt.gset()` | `GSet` | A grow-only set of strings. |
+| `crdt.lww()` | `LwwRegister` | One value, **overwritten** — the later write wins. |
+| `crdt.orset()` | `OrSet` | A set whose elements can be **removed and added again**. |
 | `crdt.automerge()` | `AutoDoc` | An Automerge document — a string map that can **update and delete**. |
 
-`AutoDoc` is the one to reach for when a grow-only lattice cannot express your data. The three above can only ever *gain* information — that is what makes their merge a lattice join — so none of them can represent removing or overwriting a value. `AutoDoc` can: `.put(key, value)`, `.get(key): ?string`, `.remove(key)`, `.keys(): List<string>`. Concurrent writes to different keys both survive; concurrent writes to the same key resolve identically on every replica.
+The first three can only ever *gain* information — that is what makes their merge a lattice join — so none of them can represent removing or overwriting a value. The last three can, in the three shapes that need it: a single value (`LwwRegister`), a collection of items (`OrSet`), and a document of named fields (`AutoDoc`).
+
+### `LwwRegister` — one value, last write wins
+
+`.set(replica, value)` writes, `.get(): ?dyn` reads, and a merge keeps the **later** write. Later means causally later, by a logical clock the register carries — not a wall clock, which two machines disagree about by seconds routinely and which would silently discard whichever write happened on the slow one. When two writes really are concurrent, the replica id breaks the tie: an arbitrary winner, but the *same* winner on every replica, which is the difference between losing a write and never converging.
+
+```noeta
+a = crdt.lww().set("A", "draft")
+b = a.set("B", "final")                     // B saw A's write, so B's is later
+echo a.merge(b).get() ?? "-"                // final — from either direction
+```
+
+### `OrSet` — a set that can forget
+
+`.insert(replica, element)`, `.remove(element)`, `.contains(e): bool`, `.len(): int`, `.members(): List<dyn>` (sorted). Every insertion carries a tag, and a remove tombstones the tags it can **observe** — hence *observed-remove*. That is what makes an element re-added after removal present, which a set that merely remembered removed elements could never say: the second add would be swallowed forever, on every replica. An add concurrent with a remove survives for the same reason — the remove never saw it.
+
+```noeta
+basket = crdt.orset().insert("A", "pears")
+echo basket.remove("pears").insert("A", "pears").contains("pears")   // true
+```
+
+The cost is tombstones: a removed element's tag is kept, because a replica that never saw the insertion cannot otherwise be told the removal covered it. That makes it a set of application items, not an event log.
+
+Both hold **data**: numbers, bools, strings, bytes, and lists or maps of them (a struct arrives as its field map). That line is drawn by the wire, not by the language surface — a replicated value has to reach a peer as bytes, so a closure or a live handle is beyond any CRDT. Passing one is refused at the call rather than stored as something it would not come back as.
+
+### `AutoDoc` — a document of named fields
+
+`.put(key, value)`, `.get(key): ?string`, `.remove(key)`, `.keys(): List<string>`. Concurrent writes to different keys both survive; concurrent writes to the same key resolve identically on every replica.
 
 ```noeta
 doc = crdt.automerge().put("title", "draft").put("author", "ada")
@@ -76,7 +105,7 @@ echo doc.remove("author").keys()          // ["title"] — a deletion that conve
 
 It is backed by [Automerge](https://automerge.org), not hand-rolled: p2panda ships no application CRDT by design (`p2panda-core` is "compatible with any application data and CRDT"), so the value layer is the consumer's to choose, and Automerge's `save`/`load`/`merge` match this package's `Syncable`/`Mergeable` contracts directly. The transport, log-sync and encryption stay p2panda's. The surface is deliberately a string map for now — nested maps, lists and rich text are the obvious follow-on.
 
-Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): List<string>` (sorted). Counters take `.increment(replica, by = 1)`, and `PnCounter` also `.decrement(replica, by = 1)`; amounts must be non-negative — a counter that needs to go down is a `PnCounter`, whose `value()` nets increments against decrements and may go negative.
+Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` and `OrSet` expose `.contains(e): bool`, `.len(): int`, and `.members()` (sorted); `LwwRegister` exposes `.get(): ?dyn`. Counters take `.increment(replica, by = 1)`, and `PnCounter` also `.decrement(replica, by = 1)`; amounts must be non-negative — a counter that needs to go down is a `PnCounter`, whose `value()` nets increments against decrements and may go negative.
 
 ```noeta
 use para.{crdt}
@@ -135,7 +164,7 @@ x = synced_signal(Lww.new(1, "hello"), "topic")   // accepted like any built-in
 `Syncable`'s contract is instance-only by design: decoding folds into `merge_bytes` — "decode a peer's state and merge it into me" — rather than sitting behind a separate `from_bytes`. The engine always holds the current value when peer state arrives, so that is the whole operation; a constructor would only mint a value to merge away immediately. It also degrades in a way a constructor could not: answer a malformed payload by returning yourself unchanged and the engine reads that as "nothing changed", where a decoder that must *produce* a value can only fail.
 
 > [!WARNING]
-> The checker enforces that you **supplied** a `merge`, not that it is commutative, associative and idempotent. No type system can check that. The four built-ins are property-tested for the three laws in `crates/noeta-crdt` and `autodoc.rs`; your type deserves the same treatment, because a merge that violates them diverges silently — replicas simply stop agreeing, with nothing to catch it.
+> The checker enforces that you **supplied** a `merge`, not that it is commutative, associative and idempotent. No type system can check that. The built-ins are property-tested for the three laws in `crates/noeta-crdt` and `autodoc.rs`; your type deserves the same treatment, because a merge that violates them diverges silently — replicas simply stop agreeing, with nothing to catch it.
 
 ## Peer-to-peer messaging — `para.p2p`
 
@@ -267,7 +296,7 @@ Together these mean replicas may exchange state in any order, with any duplicati
 - Merging a state already reflected is a no-op, so `.sync()` never spuriously reruns your effects — dependents wake only when the value actually changed.
 - A malformed or cross-type message received from a peer is untrusted input: `.sync()` skips it rather than aborting.
 - Merging two *different* CRDT types is rejected — statically on direct `.merge` calls, and as a clean runtime error (`cannot merge CRDT values of different types`) at the sync engine's dynamic seam.
-- There is no "set": a CRDT-backed signal has no way to overwrite, only to converge. Deletion needs a CRDT that can represent it (`PnCounter` can go down; `GSet` cannot forget).
+- There is no "set" on the *signal*: a CRDT-backed signal has no way to overwrite, only to converge. Overwriting and deleting belong to the value, and only a CRDT that can represent them offers them — `LwwRegister` overwrites, `OrSet` and `AutoDoc` delete, `PnCounter` goes down, and `GCounter`/`GSet` do none of it by construction.
 
 ## Transport & persistence — the loopback broker and the real node
 

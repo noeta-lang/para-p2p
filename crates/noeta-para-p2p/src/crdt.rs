@@ -1,16 +1,20 @@
-//! `para.crdt` — the language surface over the [`noeta_crdt`] convergence core (p2p P0): the three
-//! state-based CRDTs (`GCounter`, `PnCounter`, `GSet`) as first-class, **immutable value** extern
-//! types, plus the `crdt` module that constructs them.
+//! `para.crdt` — the language surface over the [`noeta_crdt`] convergence core: the state-based
+//! CRDTs (`GCounter`, `PnCounter`, `GSet`, `LwwRegister`, `OrSet`) as first-class, **immutable
+//! value** extern types, plus the `crdt` module that constructs them.
 //!
 //! Each type is a thin newtype around its [`noeta_crdt`] counterpart carrying the [`ExternValue`]
 //! contract — the orphan rule forbids implementing the ABI's trait for the foreign core type
 //! directly, exactly as [`crate::id::Uuid`] wraps `uuid::Uuid` (and exactly as a third-party
-//! extension would wrap any foreign type). The values are **plain `Send` data** whose whole state
-//! lives inside the box (a `BTreeMap`/`BTreeSet` of primitives), so they take the ordinary
-//! value-in/value-out dispatch — no retained arena, no ctx seam. That is the whole point of keeping
-//! P0's CRDTs primitive-state: convergence is provable with the simplest possible surface. (Value-
-//! *carrying* CRDTs — an LWW register over an arbitrary language value, an OR-Set — need the arena
-//! seam and arrive with the synced-signal machinery in a later slice.)
+//! extension would wrap any foreign type). Every one of them is **plain `Send` data** whose whole
+//! state lives inside the box, so they all take the ordinary value-in/value-out dispatch — no
+//! retained arena, no ctx seam.
+//!
+//! That holds for the value-carrying pair as well. A register or a set of *application* values
+//! needs its argument to arrive whole rather than as an opaque handle, which is
+//! [`ExtType::deep_marshal`](noeta_ext_abi::registry::ExtType::deep_marshal) — a declaration on the
+//! registration, not a seam — and what such a CRDT may carry is decided by the wire rather than by
+//! the dispatch: a replicated value has to reach a peer as bytes, so a closure or a live handle is
+//! beyond *any* CRDT, however it were stored. [`crate::values`] draws that line.
 //!
 //! Semantics mirror the core: updates return a **new** value (functional update), `merge` is pure
 //! and order-independent, equality is by content, and there is no ordering or key capability. Both
@@ -20,7 +24,7 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 
-use noeta_crdt::Mergeable;
+use noeta_crdt::{CrdtValue, Mergeable};
 use noeta_ext_abi::registry::{ExtFn, ExtTrait, ExtTraitMethod, NativeOut, RetTy, SigType};
 use noeta_ext_abi::{
     ErrorKind, ExternValue, Host, NativeValue, Scalar, StdError, arity_error, no_function_error,
@@ -30,12 +34,16 @@ use noeta_ext_abi::{
 pub const GCOUNTER_TYPE_NAME: &str = "GCounter";
 pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";
 pub const GSET_TYPE_NAME: &str = "GSet";
+pub const LWW_TYPE_NAME: &str = "LwwRegister";
+pub const ORSET_TYPE_NAME: &str = "OrSet";
 
 /// The CRDT types' qualified runtime identities — what
 /// [`noeta_ext_abi::ExternValue::type_identity`] returns; registered under `para.crdt`.
 pub const GCOUNTER_TYPE_IDENTITY: &str = "para.crdt.GCounter";
 pub const PNCOUNTER_TYPE_IDENTITY: &str = "para.crdt.PnCounter";
 pub const GSET_TYPE_IDENTITY: &str = "para.crdt.GSet";
+pub const LWW_TYPE_IDENTITY: &str = "para.crdt.LwwRegister";
+pub const ORSET_TYPE_IDENTITY: &str = "para.crdt.OrSet";
 
 /// The traits every CRDT extern type declares: [`MERGEABLE_TRAIT`] — the convergence capability
 /// that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound on
@@ -90,6 +98,12 @@ const MERGEABLE_METHODS: &[ExtTraitMethod] = &[ExtTraitMethod {
 const GCOUNTER_SIG: SigType = SigType::Named(GCOUNTER_TYPE_NAME);
 const PNCOUNTER_SIG: SigType = SigType::Named(PNCOUNTER_TYPE_NAME);
 const GSET_SIG: SigType = SigType::Named(GSET_TYPE_NAME);
+const LWW_SIG: SigType = SigType::Named(LWW_TYPE_NAME);
+const ORSET_SIG: SigType = SigType::Named(ORSET_TYPE_NAME);
+/// The stored-value position. `dyn` because the CRDT holds what the *program* holds: the accepted
+/// values are the ones a peer could be sent (see [`crate::values`]), which is a wire property no
+/// signature type names — so the dispatch checks it and reports the refusal at the call.
+const VALUE_SIG: SigType = SigType::Dyn;
 
 // --- Constructors: the `crdt` module ------------------------------------------------------------
 
@@ -111,6 +125,20 @@ pub const CRDT_FNS: &[ExtFn] = &[
         name: "gset",
         params: &[],
         ret: RetTy::Concrete(GSET_SIG),
+        ..ExtFn::DEFAULTS
+    },
+    // The value-carrying pair: a register whose value is overwritten, and a set whose elements can
+    // leave again — the two things the grow-only lattices above cannot express.
+    ExtFn {
+        name: "lww",
+        params: &[],
+        ret: RetTy::Concrete(LWW_SIG),
+        ..ExtFn::DEFAULTS
+    },
+    ExtFn {
+        name: "orset",
+        params: &[],
+        ret: RetTy::Concrete(ORSET_SIG),
         ..ExtFn::DEFAULTS
     },
     // The document CRDT (see `crate::autodoc`) — the one that can represent deletion and update,
@@ -140,6 +168,14 @@ pub fn crdt_dispatch(
         "gset" => {
             want_arity(func, args, 0)?;
             Ok(extern_out(GSet(noeta_crdt::GSet::new())))
+        }
+        "lww" => {
+            want_arity(func, args, 0)?;
+            Ok(extern_out(LwwRegister(noeta_crdt::LwwRegister::new())))
+        }
+        "orset" => {
+            want_arity(func, args, 0)?;
+            Ok(extern_out(OrSet(noeta_crdt::OrSet::new())))
         }
         "automerge" => {
             want_arity(func, args, 0)?;
@@ -427,6 +463,224 @@ impl ExternValue for GSet {
     }
 }
 
+// --- LwwRegister --------------------------------------------------------------------------------
+
+/// A last-write-wins register value (wraps [`noeta_crdt::LwwRegister`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LwwRegister(pub noeta_crdt::LwwRegister<CrdtValue>);
+
+pub const LWW_METHODS: &[ExtFn] = &[
+    // `set(replica, value)` — overwrite, stamped by `replica` at one logical tick past everything
+    // this register has seen. The replica id is explicit for the same reason a counter's is: the
+    // convergence story depends on one id per node, and inventing one here would hide that.
+    ExtFn {
+        param_names: &["replica", "value"],
+        name: "set",
+        params: &[SigType::String, VALUE_SIG],
+        ret: RetTy::Concrete(LWW_SIG),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "get",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Option(&VALUE_SIG)),
+    },
+    ExtFn {
+        param_names: &["other"],
+        name: "merge",
+        params: &[LWW_SIG],
+        ret: RetTy::Concrete(LWW_SIG),
+    },
+];
+
+fn lww_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let reg = downcast::<LwwRegister>(recv, LWW_TYPE_NAME)?;
+    match method {
+        "set" => {
+            want_arity(method, args, 2)?;
+            let replica = want_str(method, args, 0)?;
+            let value = crate::values::from_native(method, &args[1])?;
+            Ok(extern_out(LwwRegister(reg.0.set(replica, value))))
+        }
+        "get" => {
+            want_arity(method, args, 0)?;
+            Ok(match reg.0.get() {
+                Some(value) => NativeOut::Some(Box::new(crate::values::to_out(value))),
+                None => NativeOut::None,
+            })
+        }
+        "merge" => {
+            want_arity(method, args, 1)?;
+            let other = want_extern::<LwwRegister>(method, args, 0, LWW_TYPE_NAME)?;
+            Ok(extern_out(LwwRegister(reg.0.merge(&other.0))))
+        }
+        _ => Err(no_method_error(LWW_TYPE_NAME, method)),
+    }
+}
+
+impl ExternValue for LwwRegister {
+    fn type_identity(&self) -> &'static str {
+        LWW_TYPE_IDENTITY
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other.as_any().downcast_ref::<LwwRegister>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable
+    }
+    fn display(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        match self.0.get() {
+            Some(value) => write!(out, "<lww {value}>"),
+            None => write!(out, "<lww unset>"),
+        }
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// --- OrSet --------------------------------------------------------------------------------------
+
+/// An observed-remove set value (wraps [`noeta_crdt::OrSet`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrSet(pub noeta_crdt::OrSet<CrdtValue>);
+
+pub const ORSET_METHODS: &[ExtFn] = &[
+    // `insert(replica, element)` — tags this insertion with `replica`'s next logical time, which is
+    // what a later `remove` tombstones and what makes a re-add a *different* insertion.
+    ExtFn {
+        param_names: &["replica", "element"],
+        name: "insert",
+        params: &[SigType::String, VALUE_SIG],
+        ret: RetTy::Concrete(ORSET_SIG),
+    },
+    // `remove(element)` takes no replica id: it removes the insertions this replica has *observed*,
+    // and observation is a property of the state rather than of who is asking.
+    ExtFn {
+        param_names: &["element"],
+        name: "remove",
+        params: &[VALUE_SIG],
+        ret: RetTy::Concrete(ORSET_SIG),
+    },
+    ExtFn {
+        param_names: &["element"],
+        name: "contains",
+        params: &[VALUE_SIG],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "len",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "members",
+        params: &[],
+        ret: RetTy::Concrete(SigType::List(&VALUE_SIG)),
+    },
+    ExtFn {
+        param_names: &["other"],
+        name: "merge",
+        params: &[ORSET_SIG],
+        ret: RetTy::Concrete(ORSET_SIG),
+    },
+];
+
+fn orset_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let set = downcast::<OrSet>(recv, ORSET_TYPE_NAME)?;
+    match method {
+        "insert" => {
+            want_arity(method, args, 2)?;
+            let replica = want_str(method, args, 0)?;
+            let element = crate::values::from_native(method, &args[1])?;
+            Ok(extern_out(OrSet(set.0.insert(replica, element))))
+        }
+        "remove" | "contains" => {
+            want_arity(method, args, 1)?;
+            let element = crate::values::from_native(method, &args[0])?;
+            if method == "remove" {
+                Ok(extern_out(OrSet(set.0.remove(&element))))
+            } else {
+                Ok(NativeOut::Scalar(Scalar::Bool(set.0.contains(&element))))
+            }
+        }
+        "len" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(set.0.len() as i64)))
+        }
+        "members" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::List(
+                set.0
+                    .members()
+                    .into_iter()
+                    .map(crate::values::to_out)
+                    .collect(),
+            ))
+        }
+        "merge" => {
+            want_arity(method, args, 1)?;
+            let other = want_extern::<OrSet>(method, args, 0, ORSET_TYPE_NAME)?;
+            Ok(extern_out(OrSet(set.0.merge(&other.0))))
+        }
+        _ => Err(no_method_error(ORSET_TYPE_NAME, method)),
+    }
+}
+
+impl ExternValue for OrSet {
+    fn type_identity(&self) -> &'static str {
+        ORSET_TYPE_IDENTITY
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other.as_any().downcast_ref::<OrSet>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0
+    }
+    fn display(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        let members: Vec<String> = self
+            .0
+            .members()
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect();
+        write!(out, "<orset [{}]>", members.join(", "))
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 // --- Dynamic CRDT operations over boxed extern values (p2p P2, used by `para.synced`) ------------
 //
 // A synced signal holds a CRDT as a backend heap value it only sees as `&dyn ExternValue`; these
@@ -466,6 +720,18 @@ pub fn merge_dyn(
     ) {
         return Some(Box::new(GSet(a.0.merge(&b.0))));
     }
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<LwwRegister>(),
+        delta.as_any().downcast_ref::<LwwRegister>(),
+    ) {
+        return Some(Box::new(LwwRegister(a.0.merge(&b.0))));
+    }
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<OrSet>(),
+        delta.as_any().downcast_ref::<OrSet>(),
+    ) {
+        return Some(Box::new(OrSet(a.0.merge(&b.0))));
+    }
     None
 }
 
@@ -481,6 +747,12 @@ pub fn to_bytes_dyn(value: &dyn ExternValue) -> Option<Vec<u8>> {
         return Some(p.0.to_bytes());
     }
     if let Some(s) = value.as_any().downcast_ref::<GSet>() {
+        return Some(s.0.to_bytes());
+    }
+    if let Some(r) = value.as_any().downcast_ref::<LwwRegister>() {
+        return Some(r.0.to_bytes());
+    }
+    if let Some(s) = value.as_any().downcast_ref::<OrSet>() {
         return Some(s.0.to_bytes());
     }
     None
@@ -505,6 +777,14 @@ pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn E
         return noeta_crdt::GSet::from_bytes(bytes)
             .map(|c| Box::new(GSet(c)) as Box<dyn ExternValue>);
     }
+    if like.as_any().is::<LwwRegister>() {
+        return noeta_crdt::LwwRegister::<CrdtValue>::from_bytes(bytes)
+            .map(|r| Box::new(LwwRegister(r)) as Box<dyn ExternValue>);
+    }
+    if like.as_any().is::<OrSet>() {
+        return noeta_crdt::OrSet::<CrdtValue>::from_bytes(bytes)
+            .map(|s| Box::new(OrSet(s)) as Box<dyn ExternValue>);
+    }
     None
 }
 
@@ -515,6 +795,8 @@ pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn E
 pub const GCOUNTER_DISPATCH: noeta_ext_abi::registry::TypeDispatch = gcounter_method_dispatch;
 pub const PNCOUNTER_DISPATCH: noeta_ext_abi::registry::TypeDispatch = pncounter_method_dispatch;
 pub const GSET_DISPATCH: noeta_ext_abi::registry::TypeDispatch = gset_method_dispatch;
+pub const LWW_DISPATCH: noeta_ext_abi::registry::TypeDispatch = lww_method_dispatch;
+pub const ORSET_DISPATCH: noeta_ext_abi::registry::TypeDispatch = orset_method_dispatch;
 
 // --- Small argument helpers (the plain-dispatch ABI exposes only the error constructors) --------
 

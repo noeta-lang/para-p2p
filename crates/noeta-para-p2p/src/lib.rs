@@ -2,7 +2,8 @@
 //! **non-default** `para` namespace (the para-namespace arc, Slice 2).
 //!
 //! Three modules, all rooted at `para`:
-//!   * `para.crdt`   — state-based CRDT value types (`GCounter`/`PnCounter`/`GSet`), pure Rust.
+//!   * `para.crdt`   — state-based CRDT value types (`GCounter`/`PnCounter`/`GSet`/`LwwRegister`/
+//!     `OrSet`/`AutoDoc`), pure Rust.
 //!   * `para.p2p`    — `publish`/`receive`/`identity` over the `P2p` host capability.
 //!   * `para.synced` — `synced_signal(...)`, a CRDT-backed signal that is a node in the *same*
 //!     reactive graph as core `std.reactive` (it reaches the graph through noeta-stdlib's reactive
@@ -22,6 +23,7 @@ pub mod node;
 pub mod p2p;
 pub mod provider;
 pub mod synced;
+pub mod values;
 
 use noeta_ext_abi::registry::{ExtModule, ExtTrait, ExtType, Extension};
 
@@ -158,6 +160,30 @@ const PARA_P2P_TYPES: &[ExtType] = &[
         docs: GSET_DOCS,
         ..ExtType::DEFAULTS
     },
+    // The value-carrying pair. `deep_marshal` is the one thing that distinguishes their
+    // registration: their methods take an application *value*, which has to arrive as the full
+    // value tree rather than collapsing to an opaque handle. They are otherwise the same plain,
+    // arena-free, content-equal extern values as the lattices above.
+    ExtType {
+        name: crate::crdt::LWW_TYPE_NAME,
+        namespace: "para.crdt",
+        methods: crate::crdt::LWW_METHODS,
+        dispatch: crate::crdt::LWW_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        deep_marshal: true,
+        docs: LWW_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::ORSET_TYPE_NAME,
+        namespace: "para.crdt",
+        methods: crate::crdt::ORSET_METHODS,
+        dispatch: crate::crdt::ORSET_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        deep_marshal: true,
+        docs: ORSET_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `SyncedSignal<T>` (P2) — a signal node in the shared reactive graph holding a CRDT; its
     // methods reach the arena + graph + P2p host, so they live in the ctx table.
     ExtType {
@@ -189,6 +215,16 @@ const CRDT_DOCS: &[(&str, &str)] = &[
         "pncounter",
         "An empty increment/decrement counter (`PnCounter`) — a CRDT tracking positive and negative \
          contributions per replica.",
+    ),
+    (
+        "lww",
+        "An empty last-write-wins register (`LwwRegister`) — a CRDT holding one value, where the \
+         later write wins and concurrent writes resolve the same way on every replica.",
+    ),
+    (
+        "orset",
+        "An empty observed-remove set (`OrSet`) — a CRDT set whose elements can be removed and \
+         added again.",
     ),
 ];
 
@@ -250,6 +286,35 @@ const PNCOUNTER_DOCS: &[(&str, &str)] = &[
         "The net total (increments minus decrements) across all replicas.",
     ),
     ("merge", "Merge another `PnCounter` in."),
+];
+const LWW_DOCS: &[(&str, &str)] = &[
+    (
+        "set",
+        "Write a value, stamped by this replica — the later write wins a merge.",
+    ),
+    (
+        "get",
+        "The current value; `none` until something is written.",
+    ),
+    (
+        "merge",
+        "Merge another `LwwRegister` in — the later write wins, with a deterministic tie-break \
+         between concurrent ones.",
+    ),
+];
+const ORSET_DOCS: &[(&str, &str)] = &[
+    ("insert", "Add an element, tagged by this replica."),
+    (
+        "remove",
+        "Remove the insertions of an element this replica has seen; a later add brings it back.",
+    ),
+    ("contains", "Whether the set contains the element."),
+    ("len", "The number of elements."),
+    ("members", "The set's elements as a list."),
+    (
+        "merge",
+        "Merge another `OrSet` in — an element added concurrently with its removal stays.",
+    ),
 ];
 const SYNCED_SIGNAL_DOCS: &[(&str, &str)] = &[
     ("get", "The current merged value."),

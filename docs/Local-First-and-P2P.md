@@ -45,6 +45,9 @@ Each carries a **replica id** — a string identifying the node that made a chan
 | `crdt.gcounter()` | `GCounter` | A grow-only counter (only increments). |
 | `crdt.pncounter()` | `PnCounter` | A counter that also decrements. |
 | `crdt.gset()` | `GSet` | A grow-only set of strings. |
+| `crdt.lww()` | `LwwRegister` | One value, overwritten — the later write wins. |
+| `crdt.orset()` | `OrSet` | A set whose elements can be removed and added again. |
+| `crdt.automerge()` | `AutoDoc` | An Automerge document — a string map that can update and delete. |
 
 ```noeta check
 use para.{crdt}
@@ -65,7 +68,32 @@ has_z = s.contains("z")
 echo "${s.members()} has_z=${has_z}"             // ["x", "y", "z"] has_z=true
 ```
 
-**Methods.** Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): [string]`. Counters take `.increment(replica, by=1)` (and `PnCounter` also `.decrement(replica, by=1)`); a grow-only counter rejects a negative amount — use a `PnCounter` when you need to go down. `.merge` only accepts the *same* CRDT type, checked statically:
+A grow-only lattice can only ever *gain* information, which is what makes its merge a join and also why neither counter nor `GSet` can represent overwriting or removing. Three types can: a single value (`LwwRegister`), a collection of items (`OrSet`), and a document of named fields (`AutoDoc`).
+
+```noeta check
+use para.{crdt}
+
+// A register keeps the later write. Later is causal, by a logical clock the register carries: B
+// wrote to the state A's write produced, so B's write wins from either direction. Two genuinely
+// concurrent writes are decided by the replica id — the same way on every replica.
+draft = crdt.lww().set("A", "draft")
+final = draft.set("B", "final")
+echo final.merge(draft).get() ?? "-"        // final
+
+// An observed-remove set: an element removed and added again is present, because every insertion
+// carries a tag and a remove only tombstones the tags it has seen.
+basket = crdt.orset().insert("A", "pears")
+back = basket.remove("pears").insert("A", "pears")
+echo "${back.members()} has=${back.contains("pears")}"   // ["pears"] has=true
+
+// A document CRDT, for named fields that change and disappear.
+doc = crdt.automerge().put("title", "hello").put("author", "ada")
+echo doc.remove("author").keys()            // ["title"]
+```
+
+`LwwRegister` and `OrSet` hold **data** — numbers, bools, strings, bytes, and lists or maps of them, with a struct arriving as its field map. The wire draws that line rather than the language does: a replicated value has to reach a peer as bytes, so a closure or a live handle is beyond any CRDT, and passing one is refused where it would have been stored.
+
+**Methods.** Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` and `OrSet` expose `.contains(e): bool`, `.len(): int`, and `.members()`; `LwwRegister` exposes `.get(): ?dyn`; `AutoDoc` exposes `.get(key): ?string` and `.keys(): [string]`. Counters take `.increment(replica, by=1)` (and `PnCounter` also `.decrement(replica, by=1)`); a grow-only counter rejects a negative amount — use a `PnCounter` when you need to go down. The updates are `gset.insert(e)`, `lww.set(replica, value)`, `orset.insert(replica, element)` / `orset.remove(element)`, and `automerge.put(key, value)` / `.remove(key)`. `.merge` only accepts the *same* CRDT type, checked statically:
 
 ```noeta error
 use para.{crdt}
@@ -165,11 +193,5 @@ tally.remove_member(bob_id)     // bob is revoked — the key rotates; he can't 
 The group creator is authoritative over membership (it holds the manage capability). Membership is transparent to the converged value, so these are no-ops under the sandbox and real only over the live transport.
 
 A per-signal **`.status(): string`** — `"synced"` / `"syncing"` / `"offline"` — reports this replica's convergence state against its peers (always `"synced"` on the single-node sandbox; meaningful over a real network, e.g. to render "working offline").
-
-## What's next
-
-The transport, encryption, identity, and dynamic-membership layers ship today. Remaining future milestones:
-
-- **Richer collaborative types.** A last-write-wins register and an add/remove set (OR-Set) — CRDTs that carry arbitrary application values, not just counters and string sets.
 
 See also [Reactivity](Reactivity) for the signal/computed/effect core these build on, and [Standard-Library Modules](Standard-Library-Modules) for the full module surface.

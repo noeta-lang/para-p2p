@@ -1,0 +1,31 @@
+// para.crdt — `LwwRegister`, a last-write-wins register: one value, overwritten, converging on the
+// later write. The grow-only lattices beside it can only ever gain information, so none of them can
+// say "the title is now *this*". A register can, at the price its name states: when two replicas
+// write at once, one write is lost — and the whole design question is making that loss the *same*
+// loss on every replica, which is what the causal stamp plus its tie-break buy.
+// expect: stdout "unset=true empty=<lww unset>"
+// expect: stdout "later_wins=final final"
+// expect: stdout "concurrent=2 2 commutes=true"
+// expect: stdout "value=[\"a\", \"b\"] shown=<lww [\"a\", \"b\"]>"
+// expect: exit 0
+use para.{crdt}
+
+empty = crdt.lww()
+echo "unset=${empty.get() == none} empty=${empty}"
+
+// B wrote knowing A's write (it wrote to the state A's write produced), so B's write is causally
+// later and wins from either direction.
+a = crdt.lww().set("A", "draft")
+b = a.set("B", "final")
+echo "later_wins=${a.merge(b).get() ?? "-"} ${b.merge(a).get() ?? "-"}"
+
+// Concurrent writes: both stamped from the same state, so neither saw the other and the logical
+// times are equal. The replica id breaks the tie — the same way on both replicas, which is the
+// difference between an arbitrary winner and a permanent disagreement.
+x = crdt.lww().set("A", 1)
+y = crdt.lww().set("B", 2)
+echo "concurrent=${x.merge(y).get() ?? 0} ${y.merge(x).get() ?? 0} commutes=${x.merge(y) == y.merge(x)}"
+
+// The value is whatever the program holds, not only a string: numbers, lists and maps ride along.
+list = crdt.lww().set("A", ["a", "b"])
+echo "value=${list.get() ?? []} shown=${list}"

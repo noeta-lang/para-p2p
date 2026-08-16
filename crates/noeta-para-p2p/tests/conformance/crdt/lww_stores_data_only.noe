@@ -1,0 +1,13 @@
+// A replicated value's whole state has to reach a peer as bytes, so a CRDT can only carry data —
+// numbers, text, bytes, and lists or maps of them. A value with no wire encoding is refused at the
+// call that would have stored it, rather than stored as some shape it would not come back as: a
+// register that silently swallowed the difference would look right locally and diverge the moment
+// it met a peer.
+// expect: error E0007 at 12:5
+// expect: exit 1
+use para.{crdt}
+
+// A counter is a fine CRDT and a fine *value* — it just is not one this register can send onward.
+inner = crdt.gcounter().increment("A", 1)
+r = crdt.lww().set("A", inner)
+echo r.get() ?? "-"

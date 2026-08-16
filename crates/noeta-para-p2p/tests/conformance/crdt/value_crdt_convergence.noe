@@ -1,0 +1,35 @@
+// para.crdt — the headline property, for the two CRDTs that carry application values: three
+// replicas that each saw a different subset of the updates converge to the same value whatever
+// order they reconcile in, and re-merging a state already seen changes nothing. `crdt/convergence`
+// asserts this for a counter, where the merge is a per-replica maximum; here the register has to
+// pick a *winner* and the set has to keep an add and a remove straight, which is where an order- or
+// clock-dependent merge would show up as two replicas that never agree.
+// expect: stdout "register=final orders=true"
+// expect: stdout "idempotent=true"
+// expect: stdout "set=[\"blue\", \"green\"] orders=true"
+// expect: stdout "set_idempotent=true"
+// expect: exit 0
+use para.{crdt}
+
+// Three replicas of a register. A wrote first; B and C each wrote knowing A's write, so their
+// writes are concurrent with each other and the tie-break decides — identically everywhere.
+ra = crdt.lww().set("A", "draft")
+rb = ra.set("B", "revised")
+rc = ra.set("C", "final")
+
+r1 = ra.merge(rb).merge(rc)
+r2 = rc.merge(ra).merge(rb)
+r3 = rb.merge(rc).merge(ra)
+echo "register=${r1.get() ?? "-"} orders=${r1 == r2 && r2 == r3}"
+echo "idempotent=${r1.merge(ra) == r1}"
+
+// Three replicas of a set, with an add, a concurrent remove, and an add nobody else saw.
+sa = crdt.orset().insert("A", "red").insert("A", "green")
+sb = sa.remove("red")
+sc = crdt.orset().insert("C", "blue")
+
+s1 = sa.merge(sb).merge(sc)
+s2 = sc.merge(sb).merge(sa)
+s3 = sb.merge(sc).merge(sa)
+echo "set=${s1.members()} orders=${s1 == s2 && s2 == s3}"
+echo "set_idempotent=${s1.merge(sb) == s1}"

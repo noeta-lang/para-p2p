@@ -4,7 +4,7 @@
 //! # What lives here (and what does not)
 //!
 //! This crate owns the **oracle-critical** half of collaborative state and nothing else: the
-//! *merge algebra* over primitive replica state. It is **state-based** (a CvRDT / convergent
+//! *merge algebra* over replica state. It is **state-based** (a CvRDT / convergent
 //! replicated data type): each value carries its whole state, and [`Mergeable::merge`] computes
 //! the least upper bound of two states. The three laws every implementation here upholds —
 //!
@@ -20,6 +20,14 @@
 //! `unsafe`-free, holds **no language values**, and does **no I/O**. The `para.crdt` module in
 //! `noeta-para-p2p` wraps these types as extern values and both backends run this identical code, so
 //! the differential oracle holds by construction — the same guarantee reactivity's shared graph has.
+//!
+//! The types come in two families. [`GCounter`], [`PnCounter`] and [`GSet`] hold **their own**
+//! primitive state — a count, a member string — and the lattice is the whole type. [`LwwRegister`]
+//! and [`OrSet`] hold what the *application* put in them, so they are generic over the value and the
+//! surface instantiates them at [`CrdtValue`]: owned, ordered, serializable data. That is a value
+//! *domain*, not a language handle — the "holds no language values" rule above is unchanged, and it
+//! is not a limitation imported from the extern seam but the shape of the problem, since a value
+//! with no wire encoding could not reach a peer no matter how it were stored.
 //!
 //! # Two determinism disciplines (the differential's proof obligations)
 //!
@@ -42,6 +50,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+mod clock;
+#[cfg(test)]
+mod laws;
+mod lww;
+mod orset;
+mod value;
+
+pub use clock::Dot;
+pub use lww::LwwRegister;
+pub use orset::OrSet;
+pub use value::CrdtValue;
 
 /// A **state-based CRDT**: a join-semilattice whose [`merge`](Mergeable::merge) is commutative,
 /// associative, and idempotent. Implementing this type is a *promise* to uphold those three laws —
@@ -175,9 +195,9 @@ impl Mergeable for PnCounter {
 
 /// A **grow-only set** (G-Set) of strings: elements can only be added, and merge is set union. The
 /// simplest non-counter CRDT — a different lattice shape (union rather than per-key max) that proves
-/// the convergence machinery generalizes past counters. Removal is deliberately absent: it needs an
-/// add/remove CRDT (OR-Set) whose per-element tags belong with the value-carrying types in a later
-/// slice.
+/// the convergence machinery generalizes past counters. Removal is deliberately absent: a grow-only
+/// lattice cannot go back, which is what makes union a join. Reach for [`OrSet`] when elements have
+/// to leave again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GSet {
     /// Members, ordered — so merge/equality/`members()` are iteration-order-independent.
@@ -230,6 +250,7 @@ impl Mergeable for GSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::laws::assert_lattice_laws;
     use proptest::prelude::*;
 
     // --- GCounter -----------------------------------------------------------------------------
@@ -337,6 +358,11 @@ mod tests {
     // of all three is identical no matter how they are combined — commutativity + associativity +
     // idempotence, exercised at once, which is precisely the "converge without coordination"
     // guarantee the whole local-first design rests on.
+    //
+    // The assertions themselves live in [`crate::laws::assert_lattice_laws`], shared with
+    // `LwwRegister` and `OrSet`: each type supplies the three replica states and whatever it can
+    // additionally claim about the converged *value*, and no type gets a weaker check than the ones
+    // beside it.
 
     /// One update: which replica, whether it is an increment (`true`) or decrement, and by how much.
     fn op_strategy() -> impl Strategy<Value = (String, bool, u64)> {
@@ -366,18 +392,10 @@ mod tests {
             let b = node("B");
             let c = node("C");
 
-            prop_assert_eq!(a.merge(&b), b.merge(&a));                              // commutative
-            prop_assert_eq!(a.merge(&b).merge(&c), a.merge(&b.merge(&c)));          // associative
-            prop_assert_eq!(a.merge(&a), a.clone());                               // idempotent
-            // Convergence: every node that has seen all three states agrees, whatever the path...
-            let via_ab = a.merge(&b).merge(&c);
-            let via_ca = c.merge(&a).merge(&b);
-            prop_assert_eq!(&via_ab, &via_ca);
-            // ...and re-merging a stale copy (duplicate/out-of-order delivery) changes nothing.
-            prop_assert_eq!(via_ab.merge(&a), via_ab.clone());
+            let converged = assert_lattice_laws(&a, &b, &c);
             // The converged value is the full sum (every op counted once).
             let full = ops.iter().fold(GCounter::new(), |acc, (r, by)| acc.increment(r, *by));
-            prop_assert_eq!(via_ab.value(), full.value());
+            prop_assert_eq!(converged.value(), full.value());
         }
 
         /// PnCounter: laws + convergence over mixed inc/dec logs.
@@ -390,9 +408,7 @@ mod tests {
             let b = ops.iter().skip(1).step_by(2).fold(PnCounter::new(), apply);
             let c = ops.iter().step_by(3).fold(PnCounter::new(), apply);
 
-            prop_assert_eq!(a.merge(&b), b.merge(&a));
-            prop_assert_eq!(a.merge(&b).merge(&c), a.merge(&b.merge(&c)));
-            prop_assert_eq!(a.merge(&a), a.clone());
+            assert_lattice_laws(&a, &b, &c);
         }
 
         /// GSet: union laws + convergence over arbitrary element logs.
@@ -402,12 +418,10 @@ mod tests {
             let b = elems.iter().skip(1).step_by(2).fold(GSet::new(), |s, e| s.insert(e));
             let c = elems.iter().step_by(3).fold(GSet::new(), |s, e| s.insert(e));
 
-            prop_assert_eq!(a.merge(&b), b.merge(&a));
-            prop_assert_eq!(a.merge(&b).merge(&c), a.merge(&b.merge(&c)));
-            prop_assert_eq!(a.merge(&a), a.clone());
+            let converged = assert_lattice_laws(&a, &b, &c);
             // Convergence to the full element set.
             let full: BTreeSet<String> = elems.iter().cloned().collect();
-            prop_assert_eq!(a.merge(&b).merge(&c).members(), full.into_iter().collect::<Vec<_>>());
+            prop_assert_eq!(converged.members(), full.into_iter().collect::<Vec<_>>());
         }
     }
 }

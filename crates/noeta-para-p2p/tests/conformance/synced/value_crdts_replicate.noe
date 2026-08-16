@@ -1,0 +1,36 @@
+// para.synced — the value-carrying CRDTs across the sync seam, which is where their state actually
+// has to survive a round trip: a synced signal publishes its whole state as bytes and merges what a
+// peer publishes back, so a register's causal stamp and a set's insertion tags have to cross intact
+// or two replicas would agree locally and diverge over the wire.
+// expect: stdout "b_sees=true"
+// expect: stdout "a_after_remove=false"
+// expect: stdout "converged=[\"pears\"] [\"pears\"]"
+// expect: stdout "title=final final"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+
+a = synced_signal(crdt.orset().insert("A", "pears"), "basket")
+b = synced_signal(crdt.orset(), "basket")
+
+b.sync()
+echo "b_sees=${b.get().contains("pears")}"
+
+// B removes the element, and the removal reaches A.
+b.merge(b.get().remove("pears"))
+a.sync()
+echo "a_after_remove=${a.get().contains("pears")}"
+
+// A adds it back. The tombstone A already merged in does not swallow the new insertion — the whole
+// point of an observed-remove set, now over the transport rather than in one process.
+a.merge(a.get().insert("A", "pears"))
+b.sync()
+echo "converged=${a.get().members()} ${b.get().members()}"
+
+// A register on its own topic: the later write wins, and both replicas land on it.
+title = synced_signal(crdt.lww().set("A", "draft"), "title")
+peer = synced_signal(crdt.lww(), "title")
+peer.sync()
+peer.merge(peer.get().set("B", "final"))
+title.sync()
+echo "title=${title.get().get() ?? "-"} ${peer.get().get() ?? "-"}"

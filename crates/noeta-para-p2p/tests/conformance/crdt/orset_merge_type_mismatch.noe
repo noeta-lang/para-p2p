@@ -1,0 +1,10 @@
+// The value-carrying CRDTs take *values* in `insert`/`set`, but `merge` still takes their own type:
+// accepting any value where an element goes must not loosen the type that defines the lattice.
+// Merging an `OrSet` with a `GSet` is a static error, exactly as it is for the counters.
+// expect: error E0007 at 9:5
+// expect: exit 1
+use para.{crdt}
+
+a = crdt.orset().insert("A", "x")
+b = a.merge(crdt.gset().insert("x"))
+echo b.len()
