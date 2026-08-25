@@ -1,5 +1,5 @@
 [package]
-name = "noeta/para_p2p_demo"
+name = "local/para_p2p_demo"
 version = "0.1.0"
 
 [dependencies]
