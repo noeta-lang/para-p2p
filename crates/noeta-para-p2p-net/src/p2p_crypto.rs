@@ -98,7 +98,7 @@ impl SpacesOp {
     /// and [`NoetaForge`] always mints them with an empty body, so the canonical CBOR header
     /// encoding is the whole operation on the wire.
     pub fn to_wire(&self) -> Vec<u8> {
-        self.0.header.to_bytes()
+        self.0.header.encode()
     }
 
     /// Whether this is an encrypted **application** operation (as opposed to a control operation —
@@ -112,14 +112,9 @@ impl SpacesOp {
     /// from the header bytes. The signature travels inside the header, so [`Provenance::verify`]
     /// still checks authenticity after a round-trip.
     pub fn from_wire(bytes: &[u8]) -> Result<SpacesOp, StdError> {
-        let header: Header<SpacesExtensions> = p2panda_core::cbor::decode_cbor(bytes)
+        let header = Header::<SpacesExtensions>::decode(bytes)
             .map_err(|e| io_error(format!("cannot decode spaces operation: {e}")))?;
-        let hash = header.hash();
-        Ok(SpacesOp(SpacesOperation {
-            hash,
-            header,
-            body: None,
-        }))
+        Ok(SpacesOp(SpacesOperation::from_parts(header, None)))
     }
 }
 
@@ -163,23 +158,15 @@ impl Forge<Conditions> for NoetaForge {
             .map(|op| (op.header.seq_num + 1, Some(op.hash)))
             .unwrap_or((0, None));
 
-            let mut header = Header {
-                version: 1,
-                verifying_key: self.signing_key.verifying_key(),
-                signature: None,
-                payload_size: 0,
-                payload_hash: None,
-                seq_num,
-                backlink,
-                extensions: args,
-            };
-            header.sign(&self.signing_key);
+            // The header is built and signed in one step: the builder encodes the signing
+            // bytes, signs them, and caches the digest and size the signature covers. A
+            // spaces operation carries everything in its extensions, so it has no body.
+            let header = Header::<SpacesExtensions>::builder()
+                .seq_num(seq_num)
+                .backlink(backlink)
+                .build(&self.signing_key, args);
             let hash = header.hash();
-            let operation = SpacesOperation {
-                hash,
-                header,
-                body: None,
-            };
+            let operation = SpacesOperation::from_parts(header, None);
             self.store
                 .insert_operation(&hash, &operation, &SPACES_LOG_ID)
                 .await?;

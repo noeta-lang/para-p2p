@@ -478,7 +478,7 @@ impl P2pNode {
         self.ensure_durable(topic)?;
         let mut durable = self.durable.lock().unwrap();
         let entry = durable.get_mut(topic).expect("ensured above");
-        let body = Body::new(&message);
+        let body = Body::from_bytes(&message);
         let (hash, operation) =
             create_operation(&self.signing_key, &body, entry.seq_num, entry.backlink);
         self.runtime.block_on(async {
@@ -526,9 +526,13 @@ impl P2pNode {
                         // least) syncing with a peer, so keep the status at Synced/Syncing, never
                         // regressing it to Offline mid-stream.
                         TopicLogSyncEvent::OperationReceived { operation, .. } => {
-                            if let Some(body) = operation.body
-                                && tx.send(body.to_bytes()).is_err()
-                            {
+                            // No body means the author published an empty payload: an operation
+                            // claiming payload size 0 may not carry one (see `create_operation`).
+                            let payload = operation
+                                .body
+                                .map(|body| body.to_bytes())
+                                .unwrap_or_default();
+                            if tx.send(payload).is_err() {
                                 break; // receiver gone
                             }
                         }
@@ -948,31 +952,34 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Build a signed, sequence-numbered, back-linked operation for this author's log (verbatim from
-/// p2panda's `chat` example): the append-only-log entry that log-sync distributes.
+/// Build a signed, sequence-numbered, back-linked operation for this author's log: the
+/// append-only-log entry that log-sync distributes.
+///
+/// The builder is the only way to mint a signed header — it derives the payload size and hash from
+/// the body, encodes the signing bytes, signs them, and caches the digest and size that signature
+/// covers, none of which a caller can set by hand.
 fn create_operation(
     signing_key: &SigningKey,
     body: &Body,
     seq_num: SeqNum,
     backlink: Option<Hash>,
 ) -> (Hash, Operation) {
-    let mut header = Header {
-        version: 1,
-        verifying_key: signing_key.verifying_key(),
-        signature: None,
-        payload_size: body.size(),
-        payload_hash: Some(body.hash()),
-        seq_num,
-        backlink,
-        extensions: (),
-    };
-    header.sign(signing_key);
+    let header = Header::<()>::builder()
+        .body(body.as_bytes())
+        .seq_num(seq_num)
+        .backlink(backlink)
+        .build(signing_key, ());
     let hash = header.hash();
-    let operation = Operation {
-        hash,
-        header,
-        body: Some(body.to_owned()),
+    // An empty message travels as an operation with no body: a header claiming payload size 0
+    // carries no payload hash, and an attached empty body would contradict it — an operation a
+    // receiving peer validates and rejects. `subscribe_durable` reads a missing body back as the
+    // empty payload it was.
+    let payload = if body.size() == 0 {
+        None
+    } else {
+        Some(body.to_owned())
     };
+    let operation = Operation::from_parts(header, payload);
     (hash, operation)
 }
 

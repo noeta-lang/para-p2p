@@ -22,7 +22,11 @@ noeta-ext-abi = "0.6"
 tokio = { version = "1", features = ["rt", "fs", "io-util", "time", "net", "rt-multi-thread", "sync", "macros"] }
 futures-util = "0.3"
 p2panda-net = "0.7"
-p2panda-core = "0.7"
+# 0.7.1 is the floor, not a preference: the header builder (`Header::builder`), `Header::encode`/
+# `decode`, `Body::from_bytes` and `Operation::from_parts` are the only way to mint and read an
+# operation there — 0.7.1 made the header's digest/size fields private and moved signing out of
+# `Header::sign`, which is now test-only.
+p2panda-core = "0.7.1"
 # `spaces` pulls the group-encryption store tables (SqliteSpacesStore) p2panda-spaces needs.
 p2panda-store = { version = "0.7", features = ["spaces"] }
 p2panda-sync = "0.7"
