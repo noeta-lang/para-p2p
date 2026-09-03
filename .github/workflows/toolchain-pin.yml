@@ -90,12 +90,16 @@ jobs:
           # MINOR release is a different matter: "0.5" does not admit 0.6.0, so the range has to
           # move, and nothing else in the fleet would notice until a human tried to build.
           MINOR="$(printf '%s' "${TAG#v}" | cut -d. -f1,2)"
-          mapfile -t RANGED < <(grep -rlE '^noeta-(ext|reactive)-abi = "[0-9]' --include=Cargo.toml . || true)
+          mapfile -t RANGED < <(grep -rlE '^noeta-(ext|reactive)-abi = "=?[0-9]' --include=Cargo.toml . || true)
           for f in "${RANGED[@]:-}"; do
             [ -n "$f" ] || continue
             # Only rewrite a range the new toolchain falls OUTSIDE of — a matching minor is left
             # exactly as written, so a patch release produces no diff and no PR.
             sed -i -E '/^noeta-(ext|reactive)-abi = "/ s|"[0-9]+\.[0-9]+"|"'"$MINOR"'"|' "$f"
+            # An EXACT pin belongs to a `[patch]` table: it names the ONE published version the git
+            # source folds onto, so it has to track the tag that (a) just moved. Left behind, the
+            # graph holds two copies of the contract crate and the extension type stops matching.
+            sed -i -E '/^noeta-(ext|reactive)-abi = "=/ s|"=[0-9]+\.[0-9]+\.[0-9]+"|"='"${TAG#v}"'"|' "$f"
           done
 
           if git diff --quiet; then
@@ -131,8 +135,10 @@ jobs:
           for crate in crates/*/ native/; do
             [ -f "${crate}Cargo.toml" ] || continue
             # Never pipe the command whose exit code is the verdict — redirect, then read $?.
-            (cd "${crate}" && cargo clippy --all-targets -- -D warnings) > "/tmp/$(echo "$crate" | tr '/' '_').log" 2>&1
-            if [ $? -eq 0 ]; then
+            # The command goes INSIDE `if`. GitHub runs this step as `bash -e`, which aborts at a
+            # failing command before any `$?` test — taking the group and `tail -60` below with it,
+            # so a real failure reported as a bare exit code and nothing else. A condition is exempt.
+            if (cd "${crate}" && cargo clippy --all-targets -- -D warnings) > "/tmp/$(echo "$crate" | tr '/' '_').log" 2>&1; then
               echo "| \`${crate}\` | ✅ builds |" >> /tmp/verdict.md
             else
               echo "| \`${crate}\` | ❌ **fails** |" >> /tmp/verdict.md
