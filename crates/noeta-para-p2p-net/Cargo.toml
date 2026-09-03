@@ -15,7 +15,7 @@ rust-version = "1.95"
 [dependencies]
 # The extension contract is a published, semver-stable crate from noeta 0.5 on — a range, not a git
 # pin, so a consumer resolves one copy of the ABI against any 0.5.x toolchain.
-noeta-ext-abi = "0.7"
+noeta-ext-abi = "0.8"
 # The node owns its OWN multi-thread runtime (persistent gossip/sync tasks outlive individual
 # dispatches — a current-thread `block_on`-per-call runtime cannot), plus mpsc for the drain channels.
 # Feature set = the monorepo workspace pin's features + this crate's additions.
