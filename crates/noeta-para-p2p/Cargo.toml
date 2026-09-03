@@ -45,12 +45,12 @@ ring-p2p = ["dep:noeta-para-p2p-net"]
 # The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
 # (the fixtures resolve `para.*`, which the default std-only registry cannot).
 # Pinned to the toolchain release this package version is built against.
-noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
+noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
 # **Test-only** (a dev-dependency — it does not ship): the harness installs the full `std` runtime so
 # the fixtures actually execute. The library itself depends on nothing of `noeta-stdlib` — it reaches
 # the reactive engine purely through the `noeta-reactive-abi` capability contract.
 # Pinned to the toolchain release this package version is built against.
-noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
+noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
 
 # The contract crates ship BOTH ways: published on crates.io (what `[dependencies]` above names) and
 # as path members inside the toolchain repo (what the git-pinned dev-dependencies above resolve to,
@@ -62,8 +62,8 @@ noeta-stdlib = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
 # this repo's own `cargo test` and is silently ignored when the crate is consumed as a dependency —
 # a consumer's composed toolchain applies its own `[patch]` to the same effect.
 [patch.crates-io]
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
-noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
+noeta-reactive-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
 
 # Inlined from the monorepo's [workspace.lints] (this crate is standalone now).
 [lints.rust]
